@@ -78,13 +78,18 @@ queda en `dist\CampusCentinela.exe`.
 
 ## Opción B — Interfaz gráfica desde el código
 
+Interfaz **Flet** (estilo app, moderna):
+
 ```bash
-pip install -r requirements.txt
-python campus_centinela_gui.py
+pip install -r requirements.txt -r requirements-gui.txt
+python campus_centinela_flet.py
 ```
 
-Se abre una ventana: ingresas RUT y contraseña y usas los botones
+Se abre una ventana: ingresas **RUT y contraseña** y usas los botones
 (**Descargar certificados + Excel**, **Solo Excel**, **Diagnóstico**, **Abrir carpeta**).
+
+> También existe `campus_centinela_gui.py` (Tkinter, sin dependencias extra) como
+> alternativa de respaldo; el ejecutable oficial usa Flet.
 
 ---
 

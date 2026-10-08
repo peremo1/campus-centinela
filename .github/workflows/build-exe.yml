@@ -9,8 +9,10 @@ on:
       - "claude/**"
     paths:
       - "campus_centinela.py"
+      - "campus_centinela_flet.py"
       - "campus_centinela_gui.py"
       - "requirements.txt"
+      - "requirements-gui.txt"
       - ".github/workflows/build-exe.yml"
   workflow_dispatch: {}
 
@@ -32,13 +34,13 @@ jobs:
       - name: Instalar dependencias
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt pyinstaller
+          pip install -r requirements.txt -r requirements-gui.txt pyinstaller
 
       - name: Ejecutar pruebas
         run: python tests/test_core.py
 
-      - name: Compilar ejecutable (interfaz grafica)
-        run: pyinstaller --onefile --windowed --name CampusCentinela --clean campus_centinela_gui.py
+      - name: Compilar ejecutable (interfaz Flet)
+        run: flet pack campus_centinela_flet.py --name CampusCentinela --product-name "Campus Centinela"
 
       - name: Publicar el .exe como artifact
         uses: actions/upload-artifact@v4
