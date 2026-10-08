@@ -658,6 +658,7 @@ def generar_excel(cursos, ruta_xlsx: Path, nombre="", rut="", umbral=60):
                "INDEFINIDO": "E8EEF0", "PENDIENTE": "EDEDED", "REPROBADO": "F4CCCC"}
     cab_fill = PatternFill("solid", fgColor=TEAL)
     cab_font = Font(bold=True, color="FFFFFF")
+    link_font = Font(color="0563C1", underline="single")
     borde = Border(*(Side(style="thin", color="D0D7DA"),) * 4)
 
     wb = Workbook()
@@ -678,7 +679,7 @@ def generar_excel(cursos, ruta_xlsx: Path, nombre="", rut="", umbral=60):
 
     datos = sorted(cursos, key=lambda c: (c.categoria.lower(), c.subcategoria,
                                           c.nombre.lower()))
-    UMBRAL = "Panel!$B$8"
+    UMBRAL = "Panel!$C$8"   # celda con el numero de dias de aviso (editable)
     hoy = dt.date.today()
     snap = {}
     r = 1
@@ -697,6 +698,7 @@ def generar_excel(cursos, ruta_xlsx: Path, nombre="", rut="", umbral=60):
             d = ws.cell(r, 6)
             d.value = f'=IF(E{r}="","",E{r}-TODAY())'
             d.number_format = "0"
+            d.alignment = Alignment(horizontal="center")
             ws.cell(r, 7).value = (
                 f'=IF(E{r}="","INDEFINIDO",IF(F{r}<0,"VENCIDO",'
                 f'IF(F{r}<={UMBRAL},"POR VENCER","VIGENTE")))')
@@ -706,9 +708,21 @@ def generar_excel(cursos, ruta_xlsx: Path, nombre="", rut="", umbral=60):
         ws.cell(r, 9, c.avance)
         ws.cell(r, 10, c.vigencia)
         ws.cell(r, 11, c.estado)
-        ws.cell(r, 12, c.archivo or "")
-        ws.cell(r, 13, c.cert_url)
-        ws.cell(r, 14, c.firma_url)
+        # Archivo PDF local -> hipervinculo para abrirlo
+        cl = ws.cell(r, 12, c.archivo or "")
+        if c.archivo:
+            cl.hyperlink = c.archivo
+            cl.font = link_font
+        # URL del certificado -> hipervinculo clickable
+        cm = ws.cell(r, 13, "Descargar certificado" if c.aprobado else "")
+        if c.aprobado and c.cert_url:
+            cm.hyperlink = c.cert_url
+            cm.font = link_font
+        # Certificado de firma digital (solo algunos cursos lo tienen)
+        cn = ws.cell(r, 14, "Descargar firma digital" if c.firma_url else "")
+        if c.firma_url:
+            cn.hyperlink = c.firma_url
+            cn.font = link_font
         for col in range(1, len(enc) + 1):
             ws.cell(r, col).border = borde
         s = _situacion_snapshot(c, hoy, umbral)
@@ -727,6 +741,22 @@ def generar_excel(cursos, ruta_xlsx: Path, nombre="", rut="", umbral=60):
         ws.conditional_formatting.add(rango, FormulaRule(
             formula=[f'$G2="{etiqueta}"'], stopIfTrue=False,
             fill=PatternFill("solid", fgColor=color)))
+
+    # Refuerzo: pinta la casilla "Dias restantes" (F) por su propio numero
+    # (rojo si vencio, amarillo si quedan <= umbral, verde si quedan mas).
+    fcol = f"F2:F{nfilas}"
+    ws.conditional_formatting.add(fcol, FormulaRule(
+        formula=['AND($F2<>"",$F2<0)'], stopIfTrue=True,
+        fill=PatternFill("solid", fgColor="F4CCCC"),
+        font=Font(bold=True, color="9C2A2A")))
+    ws.conditional_formatting.add(fcol, FormulaRule(
+        formula=[f'AND($F2<>"",$F2<={UMBRAL})'], stopIfTrue=True,
+        fill=PatternFill("solid", fgColor="FCE8B2"),
+        font=Font(bold=True, color="8A6D1A")))
+    ws.conditional_formatting.add(fcol, FormulaRule(
+        formula=[f'AND($F2<>"",$F2>{UMBRAL})'], stopIfTrue=True,
+        fill=PatternFill("solid", fgColor="D9EAD3"),
+        font=Font(bold=True, color="2E6B23")))
 
     # -------------------- Hoja "Panel" --------------------
     panel.sheet_view.showGridLines = False

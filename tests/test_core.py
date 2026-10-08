@@ -195,10 +195,12 @@ def test_excel():
     formulas_dias = [ws.cell(r, 6).value for r in range(2, ws.max_row + 1)]
     assert any(str(v).startswith("=IF(") and "TODAY()" in str(v) for v in formulas_dias), \
         "falta la formula dinamica de dias restantes"
-    # Situacion dinamica referencia el umbral del Panel
+    # Situacion dinamica referencia la CELDA del umbral (C8, no la etiqueta B8)
     formulas_sit = [ws.cell(r, 7).value for r in range(2, ws.max_row + 1)]
-    assert any("Panel!$B$8" in str(v) for v in formulas_sit), \
-        "la situacion no referencia el umbral del Panel"
+    assert any("Panel!$C$8" in str(v) for v in formulas_sit), \
+        "la situacion debe referenciar Panel!$C$8 (la celda con el numero)"
+    assert not any("Panel!$B$8" in str(v) for v in formulas_sit), \
+        "no debe referenciar B8 (ahi esta la etiqueta de texto)"
 
     panel = wb["Panel"]
     assert panel["C8"].value == 60                      # umbral editable
