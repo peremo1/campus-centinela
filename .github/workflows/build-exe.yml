@@ -1,0 +1,48 @@
+name: Compilar EXE Windows
+
+# Compila CampusCentinela.exe en un runner Windows y lo deja descargable
+# como "Artifact" de la ejecucion (pestana Actions del repositorio).
+
+on:
+  push:
+    branches:
+      - "claude/**"
+    paths:
+      - "campus_centinela.py"
+      - "campus_centinela_gui.py"
+      - "requirements.txt"
+      - ".github/workflows/build-exe.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Descargar codigo
+        uses: actions/checkout@v4
+
+      - name: Preparar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Ejecutar pruebas
+        run: python tests/test_core.py
+
+      - name: Compilar ejecutable (interfaz grafica)
+        run: pyinstaller --onefile --windowed --name CampusCentinela --clean campus_centinela_gui.py
+
+      - name: Publicar el .exe como artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CampusCentinela-windows
+          path: dist/CampusCentinela.exe
+          if-no-files-found: error

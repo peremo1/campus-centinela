@@ -1,146 +1,149 @@
 # Campus Centinela — Descarga y seguimiento de certificados
 
 Herramienta para **iniciar sesión en [campuscentinela.cl](https://www.campuscentinela.cl)**,
-descargar los certificados de los cursos, **ordenarlos por categoría** y generar un
-**Excel con las fechas de emisión y vencimiento**, para controlar cursos pendientes o
-vencidos y no quedar atrasado.
+descargar los certificados de los cursos, **ordenarlos por categoría y subcategoría** y
+generar un **Excel con las fechas de emisión y vencimiento**, para controlar cursos
+pendientes o vencidos.
 
-> Pensada para que un/a encargado/a de capacitación o prevención lleve el control de la
-> situación de sus cursos (o los del personal autorizado a su cargo), usando las
-> credenciales de la cuenta correspondiente.
+Incluye **interfaz gráfica** (botones, sin línea de comandos) y se puede obtener como
+**ejecutable `.exe` de Windows**.
 
 ---
 
 ## ¿Tiene API la plataforma?
 
-**No.** El sitio corre sobre **Joomla** (CMS): el login es el módulo estándar
-`com_users`, con un **token CSRF** dinámico (el campo oculto de nombre aleatorio con
-valor `1`) y un campo `return` en base64. Los certificados se generan con un **script
-PHP a medida** (`certificado.php?id=...&rut=...`), no con un API REST. El mismo link
-cambia el PDF según el parámetro `id`; el `rut` identifica a la persona.
+**No.** El sitio corre sobre **Joomla + Joomdle/Moodle**. El login es el módulo estándar
+`com_users` con **token CSRF** dinámico. Los certificados los genera un **script PHP**
+(`certificado.php?id=...&rut=...`). El `id` del certificado es el **id de curso de
+Moodle**, el mismo que aparece en los enlaces `land.php?...&id=...` del catálogo. Por eso
+la herramienta extrae ese `id` de cada curso y arma la URL del certificado.
 
-Por eso el enfoque correcto es **mantener una sesión (cookie)** e interactuar con las
-páginas como lo haría un navegador. Eso es justamente lo que hace esta herramienta.
+El enfoque correcto es mantener una **sesión (cookie)** e interactuar con las páginas
+como un navegador. Es lo que hace esta herramienta.
 
 ---
 
-## Requisitos
+## Categorías
 
-- Python 3.9 o superior
-- Conexión a internet con acceso a `campuscentinela.cl`
+Los certificados se guardan en **dos niveles de carpetas**:
 
-Instala las dependencias:
+```
+salida/certificados/
+├── Aulas Virtuales/
+│   ├── Seguridad y Salud Ocupacional/
+│   ├── Operaciones Planta Concentradora y-o Catodo/
+│   └── Mantenimiento Mina/
+└── E-Learning/
+    ├── TRANSV/        (Transversales)
+    ├── OM/            (Operación Mina)
+    ├── EDC/           (Estándares de Control)
+    ├── MA/            (Medio Ambiente)
+    ├── DI/  DM/  MANT/  MUELLE/  OPC/  EO/  FIN/
+    └── Otros/         (sin prefijo reconocible)
+```
+
+- **Nivel 1 (modalidad):** `Aulas Virtuales` o `E-Learning`, según el nombre del curso.
+- **Nivel 2 (subcategoría):**
+  - E-Learning → el **prefijo** del curso (TRANSV, OM, EDC, DI, DM, MA, MANT, MUELLE,
+    OPC, EO, FIN…). Si no hay prefijo → `Otros`.
+  - Aulas Virtuales → el **área** (SSO / Operaciones Planta / Mantenimiento Mina).
+
+Las mismas columnas (Modalidad y Subcategoría) aparecen en el Excel, con filtros.
+
+---
+
+## Opción A — Ejecutable `.exe` (recomendado si Python te da problemas)
+
+No necesitas instalar Python. Hay dos formas de conseguir el `.exe`:
+
+### A.1 Descargarlo ya compilado (GitHub Actions)
+
+Cada vez que se actualiza el código, GitHub compila el `.exe` automáticamente en un
+servidor Windows:
+
+1. Entra al repositorio en GitHub → pestaña **Actions**.
+2. Abre la ejecución más reciente de **“Compilar EXE Windows”** (con ✓ verde).
+3. En **Artifacts**, descarga **`CampusCentinela-windows`** y descomprímelo.
+4. Ejecuta **`CampusCentinela.exe`**.
+
+### A.2 Compilarlo tú en tu PC con Windows
+
+Con Python instalado, haz doble clic en **`build_exe.bat`**. Al terminar, el ejecutable
+queda en `dist\CampusCentinela.exe`.
+
+> El `.exe` **no incluye** tus credenciales. Al abrirlo ingresas RUT y contraseña; puedes
+> marcar “Recordar datos” para guardarlos en un `config.ini` junto al ejecutable.
+
+---
+
+## Opción B — Interfaz gráfica desde el código
 
 ```bash
 pip install -r requirements.txt
+python campus_centinela_gui.py
 ```
 
----
-
-## Configuración (credenciales fuera del código)
-
-1. Copia la plantilla y edítala:
-
-   ```bash
-   cp config.example.ini config.ini
-   ```
-
-2. Completa `config.ini` con el **RUT** (usuario) y la **contraseña**:
-
-   ```ini
-   [credenciales]
-   usuario = 21080196-0
-   contrasena = TU_CONTRASENA
-   rut =                 ; vacío = usa el mismo 'usuario'
-
-   [opciones]
-   carpeta_salida = salida
-   url_base = https://www.campuscentinela.cl
-   ```
-
-> **`config.ini` nunca se sube al repositorio** (está en `.gitignore`).
-> También puedes pasar las credenciales por variables de entorno
-> `CC_USUARIO` / `CC_CONTRASENA` / `CC_RUT`, o con `--interactivo` para que te las pida
-> por teclado.
+Se abre una ventana: ingresas RUT y contraseña y usas los botones
+(**Descargar certificados + Excel**, **Solo Excel**, **Diagnóstico**, **Abrir carpeta**).
 
 ---
 
-## Uso
-
-**Primera vez — diagnóstico** (inicia sesión y guarda el HTML real de las páginas para
-verificar que todo calza con tu cuenta):
+## Opción C — Línea de comandos
 
 ```bash
-python campus_centinela.py --dump
+pip install -r requirements.txt
+cp config.example.ini config.ini        # completar RUT + contraseña
+python campus_centinela.py --dump        # 1ª vez: diagnóstico
+python campus_centinela.py               # descarga + Excel
 ```
 
-**Uso normal** (login → descarga certificados → genera Excel):
+Credenciales: en `config.ini` (ignorado por git), por variables de entorno
+`CC_USUARIO`/`CC_CONTRASENA`/`CC_RUT`, o con `--interactivo`.
+
+| Opción            | Qué hace                                               |
+|-------------------|--------------------------------------------------------|
+| `--dump`          | Guarda `diagnostico/portada.html` y `progreso-cursos.html` |
+| `--sin-descarga`  | Solo genera el Excel                                   |
+| `--salida CARPETA`| Cambia la carpeta de resultados                        |
+| `--interactivo`   | Pide usuario/contraseña por teclado                    |
+| `-v`              | Modo detallado                                         |
+
+---
+
+## El Excel
+
+Hoja **“Certificados”**: Modalidad, Subcategoría, Curso, Estado, Situación, Fecha de
+emisión, Fecha de vencimiento, Días para vencer, ID curso, RUT, Archivo PDF, URL.
+Colores: 🔴 vencido · 🟡 por vencer (≤ 60 días) · 🟢 vigente.
+Hoja **“Resumen”**: totales por situación y por modalidad.
+
+---
+
+## Pruebas
+
+Las pruebas (sin red) validan la clasificación con nombres reales de cursos, la
+extracción de `id`, la construcción de la URL de certificado y la generación del Excel:
 
 ```bash
-python campus_centinela.py
+python tests/test_core.py
 ```
-
-Opciones útiles:
-
-| Opción            | Qué hace                                                        |
-|-------------------|-----------------------------------------------------------------|
-| `--dump`          | Guarda `diagnostico/portada.html` y `progreso-cursos.html`      |
-| `--sin-descarga`  | Solo genera el Excel, sin bajar los PDF                          |
-| `--salida CARPETA`| Cambia la carpeta de resultados                                 |
-| `--interactivo`   | Pide usuario/contraseña por teclado si faltan                   |
-| `-v`              | Modo detallado (debug)                                          |
 
 ---
 
-## Resultado
+## Si el diagnóstico no reconoce los certificados
 
-```
-salida/
-├── certificados/
-│   ├── Seguridad Minera/
-│   │   ├── Induccion Hombre Nuevo_id134.pdf
-│   │   └── Manejo de Sustancias Peligrosas_id140.pdf
-│   └── Salud Ocupacional/
-│       └── Protocolo Silice_id201.pdf
-└── certificados_centinela.xlsx
-```
+La página `/progreso-cursos` podría tener una estructura distinta a la supuesta. En ese
+caso:
 
-El Excel (`certificados_centinela.xlsx`) trae:
-
-- **Hoja "Certificados":** categoría, curso, estado, situación, fecha de emisión,
-  fecha de vencimiento, días para vencer, ID, RUT, ruta del PDF y URL. Con filtros
-  y colores: 🔴 vencido · 🟡 por vencer (≤ 60 días) · 🟢 vigente.
-- **Hoja "Resumen":** totales por situación.
-
----
-
-## Convertir a `.exe` (opcional, Windows)
-
-```bash
-pip install pyinstaller
-pyinstaller --onefile campus_centinela.py
-```
-
-El ejecutable queda en `dist/`. Debe acompañarse de un `config.ini` en la misma carpeta
-(o usar variables de entorno / `--interactivo`).
-
----
-
-## Si el parser no reconoce los certificados
-
-La página de progreso puede tener una estructura distinta a la esperada (o cargar datos
-por JavaScript). En ese caso:
-
-1. Ejecuta `python campus_centinela.py --dump`
-2. Revisa `diagnostico/progreso-cursos.html`
-
-Con ese HTML se pueden afinar los selectores del parser (función `extraer_certificados`).
+1. Botón **Diagnóstico** (o `python campus_centinela.py --dump`).
+2. Revisa / comparte `diagnostico/progreso-cursos.html` para afinar el parser
+   (`extraer_cursos` en `campus_centinela.py`).
 
 ---
 
 ## Nota de seguridad
 
-- No guardes la contraseña en claro más de lo necesario; `config.ini` está excluido del
-  repositorio justamente por eso.
-- Usa esta herramienta solo con cuentas que estés autorizado/a a gestionar.
-- Si una contraseña se compartió por chat o captura de pantalla, conviene **cambiarla**.
+- Usa la herramienta solo con cuentas que estés autorizado/a a gestionar.
+- `config.ini` está excluido del repositorio para no subir credenciales.
+- Si una contraseña o un **token de sesión** (los enlaces `land.php?...&token=...`) se
+  compartió por chat o captura, conviene **cerrarlo/cambiarla**.
