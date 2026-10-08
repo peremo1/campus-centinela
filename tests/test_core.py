@@ -1,160 +1,61 @@
 # -*- coding: utf-8 -*-
-"""Pruebas del nucleo con nombres reales de cursos de Campus Centinela.
+"""Pruebas del nucleo (sin red) de Campus Centinela.
 
-No tocan la red: validan clasificacion (modalidad + subcategoria), extraccion
-de ids, construccion de la URL de certificado y generacion del Excel.
+Validan: login (campos del formulario real), normalizacion de RUT,
+clasificacion por prefijo, y el consumo de la API JSON de cursos
+(categorias reales, fechas de vigencia, firma digital, filtros y Excel).
 
 Ejecutar:  python tests/test_core.py
 """
 import sys
 import tempfile
+import datetime as dt
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import campus_centinela as cc
 
-cfg = cc.Config(usuario="21080196-0", contrasena="x", rut="21080196-0",
-                carpeta_salida="salida", url_base="https://www.campuscentinela.cl")
+BASE = "https://www.campuscentinela.cl"
+cfg = cc.Config("21080196-0", "x", "", "salida", BASE)
+
 
 # --------------------------------------------------------------------------- #
-# 1) Clasificacion: casos reales (modalidad, subcategoria esperada)
+# 1) Clasificacion por prefijo (subcategoria)
 # --------------------------------------------------------------------------- #
 CASOS = [
-    # Aulas Virtuales
-    ("Aula IRL Mina General", "Aulas Virtuales", "Seguridad y Salud Ocupacional"),
-    ("Aula IRL Muelle", "Aulas Virtuales", "Seguridad y Salud Ocupacional"),
-    ("Aula IRL SSO Persona Nueva", "Aulas Virtuales", "Seguridad y Salud Ocupacional"),
-    ("Aula IRL Mantenimiento Mina", "Aulas Virtuales", "Seguridad y Salud Ocupacional"),
-    ("AULA IRL Depósito de Relaves Espesados", "Aulas Virtuales", "Seguridad y Salud Ocupacional"),
-    ("Aula IRL Autonomía", "Aulas Virtuales", "Seguridad y Salud Ocupacional"),
-    ("AULA Reglamento General de Aislación y Bloqueo", "Aulas Virtuales",
-     "Operaciones Planta Concentradora y-o Catodo"),
-    ("AULA Operador/a de Aislamiento", "Aulas Virtuales",
-     "Operaciones Planta Concentradora y-o Catodo"),
-    ("AULA Reglamento de Aislación y Bloqueo para Equipos Móviles", "Aulas Virtuales",
-     "Mantenimiento Mina"),
-    # E-Learning por prefijo
-    ("DI Ambientes Respetuosos - Ley Karin", "E-Learning", "DI"),
-    ("DM Camión de Extracción KOMATSU 980 E-5 AHT", "E-Learning", "DM"),
-    ("EDC Trabajos en Altura", "E-Learning", "EDC"),
-    ("EDC Prevención de la Silicosis", "E-Learning", "EDC"),
-    ("EO Tengo Una Idea", "E-Learning", "EO"),
-    ("FIN Administradores de Contrato en la Práctica", "E-Learning", "FIN"),
-    ("MA Cambio Climático", "E-Learning", "MA"),
-    ("MANT Bloqueo Digital Biométrico", "E-Learning", "MANT"),
-    ("MUELLE Conducción Cuesta Michilla", "E-Learning", "MUELLE"),
-    ("OM Geotecnia Operativa Básica", "E-Learning", "OM"),
-    ("Om Procedimiento Comunicaciones", "E-Learning", "OM"),          # mixed case
-    ("OPC Manejo de Ácido Sulfúrico", "E-Learning", "OPC"),
-    ("TRANSV Primeros Auxilios", "E-Learning", "TRANSV"),
-    ("Transv Art 360", "E-Learning", "TRANSV"),                       # mixed case
-    ("Transv Recss", "E-Learning", "TRANSV"),
-    # Sin prefijo reconocible
-    ("Inducción Medio Ambiente Proyecto Nueva Centinela", "E-Learning", "Otros"),
-    ("Estandar por Contingencia de Gases Nitrosos", "E-Learning", "Otros"),
+    ("DI Ambientes Respetuosos - Ley Karin", "DI"),
+    ("DM Camion de Extraccion KOMATSU 980", "DM"),
+    ("EDC Trabajos en Altura", "EDC"),
+    ("MA Cambio Climatico", "MA"),
+    ("OM Geotecnia Operativa Basica", "OM"),
+    ("Om Procedimiento Comunicaciones", "OM"),
+    ("OPC Manejo de Acido Sulfurico", "OPC"),
+    ("TRANSV Primeros Auxilios", "TRANSV"),
+    ("Transv Art 360", "TRANSV"),
+    ("MUELLE Conduccion Cuesta Michilla", "MUELLE"),
+    ("Induccion Medio Ambiente Proyecto Nueva Centinela", "Otros"),
 ]
 
 
 def test_clasificacion():
-    errores = []
-    for nombre, mod_esp, sub_esp in CASOS:
-        mod, sub = cc.clasificar_curso(nombre)
-        if (mod, sub) != (mod_esp, sub_esp):
-            errores.append(f"  '{nombre}' -> ({mod}, {sub})  esperado ({mod_esp}, {sub_esp})")
-    assert not errores, "Clasificaciones incorrectas:\n" + "\n".join(errores)
-    print(f"[OK] clasificacion: {len(CASOS)} casos correctos")
+    for nombre, sub in CASOS:
+        got = cc.subcategoria_de(nombre)
+        assert got == sub, f"'{nombre}' -> {got}, esperado {sub}"
+    print(f"[OK] subcategoria por prefijo: {len(CASOS)} casos")
 
 
 # --------------------------------------------------------------------------- #
-# 2) Extraccion de ids + construccion de URL de certificado
+# 2) Login: solo radios marcados; opcion nacional/extranjero
 # --------------------------------------------------------------------------- #
-HTML_PROGRESO = """
-<h3>Mis cursos</h3>
-<table>
- <tr><th>Curso</th><th>Emisión</th><th>Vence</th><th>Certificado</th></tr>
- <tr><td>TRANSV Primeros Auxilios</td><td>10-01-2024</td><td>10-01-2026</td>
-     <td><a href="/lms/certificados/2_descarga_certificado/certificado.php?id=223&amp;rut=21080196-0">Descargar</a></td></tr>
- <tr><td>OPC Manejo de Ácido Sulfúrico</td><td>05-05-2025</td><td>05-05-2027</td>
-     <td><a href="https://www.campuscentinela.cl/lms/certificados/2_descarga_certificado/certificado.php?id=134&rut=21080196-0">Descargar</a></td></tr>
- <tr><td>MA Cambio Climático</td><td>01-02-2023</td><td>01-02-2025</td>
-     <td><button onclick="location.href='/lms//auth/joomdle/land.php?username=21080196-0&token=TOKENFALSO&mtype=course&id=178&use_wrapper=1&Itemid=405'">Entrar</button></td></tr>
-</table>
-"""
-
-
-def test_extraccion():
-    cursos = cc.extraer_cursos(HTML_PROGRESO, cfg)
-    por_id = {c.curso_id: c for c in cursos}
-    assert set(por_id) == {"223", "134", "178"}, f"ids: {set(por_id)}"
-
-    # 223: enlace certificado.php directo
-    c223 = por_id["223"]
-    assert (c223.modalidad, c223.subcategoria) == ("E-Learning", "TRANSV")
-    assert "certificado.php?id=223" in c223.cert_url
-
-    # 134: enlace certificado.php absoluto
-    c134 = por_id["134"]
-    assert (c134.modalidad, c134.subcategoria) == ("E-Learning", "OPC")
-    assert "certificado.php?id=134" in c134.cert_url
-
-    # 178: SOLO habia land.php -> la URL de certificado se CONSTRUYE desde el id
-    c178 = por_id["178"]
-    assert (c178.modalidad, c178.subcategoria) == ("E-Learning", "MA")
-    assert c178.cert_url == cfg.url_certificado("178"), c178.cert_url
-    assert "certificado.php?id=178" in c178.cert_url
-    assert "rut=21080196-0" in c178.cert_url
-
-    print("[OK] extraccion: 3 cursos, ids correctos, URL de certificado construida "
-          "desde land.php cuando no hay enlace directo")
-
-
-# --------------------------------------------------------------------------- #
-# 3) Fechas / situacion y estructura de carpetas
-# --------------------------------------------------------------------------- #
-def test_fechas_y_carpetas():
-    cursos = cc.extraer_cursos(HTML_PROGRESO, cfg)
-    por_id = {c.curso_id: c for c in cursos}
-    assert por_id["223"].fecha_emision.isoformat() == "2024-01-10"
-    assert por_id["223"].fecha_vencimiento.isoformat() == "2026-01-10"
-    # 134 vence 2027 -> vigente ; 178 vence 2025 -> vencido
-    assert por_id["134"].situacion() == "VIGENTE", por_id["134"].situacion()
-    assert por_id["178"].situacion() == "VENCIDO", por_id["178"].situacion()
-    # Carpeta relativa de 2 niveles
-    assert str(por_id["223"].carpeta_relativa()).replace("\\", "/") == "E-Learning/TRANSV"
-    assert por_id["223"].nombre_archivo().endswith("_id223.pdf")
-    print("[OK] fechas, situacion y carpetas de 2 niveles correctas")
-
-
-# --------------------------------------------------------------------------- #
-# 4) Generacion de Excel
-# --------------------------------------------------------------------------- #
-def test_excel():
-    cursos = cc.extraer_cursos(HTML_PROGRESO, cfg)
-    out = Path(tempfile.gettempdir()) / "test_centinela.xlsx"
-    if out.exists():
-        out.unlink()
-    conteo = cc.generar_excel(cursos, out)
-    assert out.exists() and out.stat().st_size > 0
-    assert conteo["VENCIDO"] >= 1 and conteo["VIGENTE"] >= 1
-    # Verificar que se puede reabrir y tiene las columnas nuevas
-    from openpyxl import load_workbook
-    wb = load_workbook(out)
-    ws = wb["Certificados"]
-    encabezados = [c.value for c in ws[1]]
-    assert encabezados[0] == "Modalidad" and encabezados[1] == "Subcategoria"
-    print(f"[OK] excel generado y reabierto ({out.stat().st_size} bytes); "
-          f"conteo={conteo}")
-
-
-# HTML real del formulario de login (del .mhtml que entrego el usuario)
 FORM_LOGIN = """
 <form action="https://www.campuscentinela.cl/ingresar?task=user.login" method="post" class="form-validate">
-  <label><input type="radio" name="opcion" value="nacional" checked=""> NACIONAL</label>
+  <label><input type="radio" name="opcion" value="nacional" checked> NACIONAL</label>
   <label><input type="radio" name="opcion" value="extranjero"> EXTRANJERO</label>
   <input type="text" name="username" value="">
   <input type="password" name="password" value="">
-  <label><input type="checkbox" name="remember" value="yes"> Recuerdeme</label>
-  <button type="submit">Identificarse</button>
+  <input type="checkbox" name="remember" value="yes">
+  <input type="hidden" name="return" value="aHR0cHM=">
+  <input type="hidden" name="20825ccc03ed06f429d141237fc54fa7" value="1">
 </form>
 """
 
@@ -162,39 +63,135 @@ FORM_LOGIN = """
 def test_campos_login():
     from bs4 import BeautifulSoup
     form = BeautifulSoup(FORM_LOGIN, "html.parser").find("form")
-
-    # NACIONAL (por defecto): debe enviar opcion=nacional, NO extranjero
-    c = cc.Config("21.080.196-0", "clave", "", "salida", "https://www.campuscentinela.cl")
-    datos = cc._campos_formulario(form, c)
-    assert datos["opcion"] == "nacional", datos.get("opcion")
+    datos = cc._campos_formulario(form, cc.Config("21.080.196-0", "clave", "", ".", BASE))
+    assert datos["opcion"] == "nacional"
     assert datos["username"] == "21080196-0"
     assert datos["password"] == "clave"
     assert datos["remember"] == "yes"
-
-    # EXTRANJERO: debe enviar opcion=extranjero
-    c2 = cc.Config("ABC123", "y", "", "salida", "https://www.campuscentinela.cl",
-                   extranjero=True)
-    datos2 = cc._campos_formulario(form, c2)
+    # el token CSRF (campo oculto) se reenvia
+    assert datos.get("20825ccc03ed06f429d141237fc54fa7") == "1"
+    datos2 = cc._campos_formulario(form, cc.Config("X", "y", "", ".", BASE, extranjero=True))
     assert datos2["opcion"] == "extranjero"
-    print("[OK] login: solo radios marcados; opcion=nacional por defecto, "
-          "extranjero cuando se pide")
+    print("[OK] login: opcion correcta y token CSRF reenviado")
 
 
 def test_normalizar_rut():
     assert cc.normalizar_rut(" 21.080.196-0 ") == "21080196-0"
     assert cc.normalizar_rut("12.345.678-k") == "12345678-K"
-    assert cc.normalizar_rut("21080196-0") == "21080196-0"
-    # El RUT del certificado se deriva del usuario cuando no se entrega.
-    c = cc.Config(usuario="21.080.196-0", contrasena="x", rut="",
-                  carpeta_salida="salida", url_base="https://www.campuscentinela.cl")
+    c = cc.Config("21.080.196-0", "x", "", "salida", BASE)
     assert c.usuario == "21080196-0" and c.rut == "21080196-0"
-    print("[OK] normalizacion de RUT y derivacion del rut de certificado")
+    print("[OK] normalizacion de RUT")
+
+
+# --------------------------------------------------------------------------- #
+# 3) Calculo de vencimiento (replica la formula de la plataforma)
+# --------------------------------------------------------------------------- #
+def test_vencimiento():
+    f = dt.date(2024, 3, 15)
+    assert cc._calcular_vencimiento("50", "1 año", f) == (dt.date(2025, 3, 15), False)
+    assert cc._calcular_vencimiento("50", "2 años", f) == (dt.date(2026, 3, 15), False)
+    assert cc._calcular_vencimiento("50", "6 meses", f) == (dt.date(2024, 9, 15), False)
+    assert cc._calcular_vencimiento("50", "Indefinida", f) == (None, False)
+    # curso de vigencia fija -> no vence
+    assert cc._calcular_vencimiento("1411", "1 año", f) == (None, True)
+    assert cc._parse_fecha_iso("2024-03-15 10:20:30") == dt.date(2024, 3, 15)
+    print("[OK] vencimiento: años/meses/indefinida/fija y parseo de fecha")
+
+
+# --------------------------------------------------------------------------- #
+# 4) Consumo de la API JSON (con sesion simulada)
+# --------------------------------------------------------------------------- #
+JSON_CURSOS = """{"success":true,"data":[
+ {"curso_id":"134","cat_id":"10","curso_cat":"OPERACIONES PLANTA CONCENTRADORA Y/O CATODO",
+  "curso_nombre":"OPC Manejo de Acido Sulfurico","estado_curso":"APROBADO","notobt":"100",
+  "porcentaje_avance":"100","vigencia":"1 año","fecha_nota":"2024-03-15 00:00:00",
+  "certificado_directo":"https://www.campuscentinela.cl/lms/certificados/2_descarga_certificado/certificado.php?id=134&rut=21080196-0",
+  "firma_digital":"0","s":"0","d":"0"},
+ {"curso_id":"223","cat_id":"5","curso_cat":"SEGURIDAD Y SALUD OCUPACIONAL",
+  "curso_nombre":"TRANSV Primeros Auxilios","estado_curso":"APROBADO","notobt":"90",
+  "porcentaje_avance":"100","vigencia":"2 años","fecha_nota":"2023-01-10",
+  "certificado_directo":"","firma_digital":"191780","s":"0","d":"0"},
+ {"curso_id":"999","cat_id":"7","curso_cat":"SUSTENTABILIDAD Y MEDIO AMBIENTE",
+  "curso_nombre":"MA Cambio Climatico","estado_curso":"PENDIENTE","notobt":"0",
+  "porcentaje_avance":"20","vigencia":"6 meses","fecha_nota":"","firma_digital":"0","s":"0","d":"0"},
+ {"curso_id":"77","cat_id":"28","curso_cat":"EXCLUIDA","curso_nombre":"XX Excluido",
+  "estado_curso":"APROBADO","vigencia":"1 año","fecha_nota":"2024-01-01","s":"0","d":"0"},
+ {"curso_id":"2594","cat_id":"9","curso_cat":"OTRA","curso_nombre":"Oculto",
+  "estado_curso":"APROBADO","s":"0","d":"0"},
+ {"curso_id":"1411","cat_id":"3","curso_cat":"MUELLE","curso_nombre":"MUELLE Conduccion Cuesta Michilla",
+  "estado_curso":"APROBADO","notobt":"100","porcentaje_avance":"100","vigencia":"1 año",
+  "fecha_nota":"2020-01-01","certificado_directo":"","firma_digital":"0","s":"0","d":"0"}
+]}"""
+
+
+class _FakeResp:
+    def __init__(self, text):
+        self.text = text
+        self.headers = {"Content-Type": "application/json"}
+        self.content = text.encode()
+    def raise_for_status(self):
+        pass
+
+
+class _FakeSession:
+    def __init__(self, text):
+        self._text = text
+    def get(self, url, **kw):
+        return _FakeResp(self._text)
+
+
+def test_obtener_cursos():
+    cursos = cc.obtener_cursos(_FakeSession(JSON_CURSOS), cfg, diag_dir=None)
+    por_id = {c.curso_id: c for c in cursos}
+    # Se excluyen cat_id 28 y el curso 2594
+    assert set(por_id) == {"134", "223", "999", "1411"}, set(por_id)
+
+    c134 = por_id["134"]
+    assert c134.categoria == "OPERACIONES PLANTA CONCENTRADORA Y/O CATODO"
+    assert c134.subcategoria == "OPC"
+    assert "certificado.php?id=134" in c134.cert_url
+    assert c134.fecha_emision == dt.date(2024, 3, 15)
+    assert c134.fecha_vencimiento == dt.date(2025, 3, 15)
+    assert c134.situacion() == "VENCIDO"            # vencio en 2025
+    assert c134.aprobado
+
+    c223 = por_id["223"]
+    assert c223.subcategoria == "TRANSV"
+    assert "certificado.php?id=223" in c223.cert_url  # construida (venia vacia)
+    assert c223.firma_url.endswith("IdDoc=191780")
+
+    c999 = por_id["999"]
+    assert c999.situacion() == "PENDIENTE" and not c999.aprobado
+
+    c1411 = por_id["1411"]
+    assert c1411.vigencia_fija and c1411.situacion() == "VIGENCIA_FIJA"
+    assert c1411.fecha_vencimiento is None
+
+    # carpetas de 2 niveles: categoria / subcategoria
+    assert str(c134.carpeta_relativa()).replace("\\", "/") == \
+        "OPERACIONES PLANTA CONCENTRADORA Y-O CATODO/OPC"
+    print("[OK] API JSON: 6 -> 4 cursos (filtros), categorias/fechas/firma/vigencia fija")
+
+
+def test_excel():
+    cursos = cc.obtener_cursos(_FakeSession(JSON_CURSOS), cfg, diag_dir=None)
+    out = Path(tempfile.gettempdir()) / "test_centinela.xlsx"
+    if out.exists():
+        out.unlink()
+    conteo = cc.generar_excel(cursos, out)
+    assert out.exists() and out.stat().st_size > 0
+    from openpyxl import load_workbook
+    ws = load_workbook(out)["Certificados"]
+    enc = [c.value for c in ws[1]]
+    assert enc[0] == "Categoria" and "Vigencia" in enc and "Nota %" in enc
+    assert conteo.get("VENCIDO", 0) >= 2
+    print(f"[OK] excel: columnas nuevas y conteo={dict(conteo)}")
 
 
 if __name__ == "__main__":
     fallos = 0
-    for fn in (test_clasificacion, test_extraccion, test_fechas_y_carpetas, test_excel,
-               test_campos_login, test_normalizar_rut):
+    for fn in (test_clasificacion, test_campos_login, test_normalizar_rut,
+               test_vencimiento, test_obtener_cursos, test_excel):
         try:
             fn()
         except AssertionError as e:

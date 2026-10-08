@@ -10,45 +10,48 @@ Incluye **interfaz gráfica** (botones, sin línea de comandos) y se puede obten
 
 ---
 
-## ¿Tiene API la plataforma?
+## ¿Cómo obtiene los datos?
 
-**No.** El sitio corre sobre **Joomla + Joomdle/Moodle**. El login es el módulo estándar
-`com_users` con **token CSRF** dinámico. Los certificados los genera un **script PHP**
-(`certificado.php?id=...&rut=...`). El `id` del certificado es el **id de curso de
-Moodle**, el mismo que aparece en los enlaces `land.php?...&id=...` del catálogo. Por eso
-la herramienta extrae ese `id` de cada curso y arma la URL del certificado.
+El sitio corre sobre **Joomla 3.10 + Joomdle/Moodle**. El login es el módulo estándar
+`com_users` (con **token CSRF** y un selector **NACIONAL/EXTRANJERO**). No hay API
+pública documentada, pero la página de progreso usa internamente un **endpoint JSON**
+(`index.php?option=com_ajax&module=customphp&method=consultorcursosSegundaVersion&format=json&rut=...`)
+que devuelve **todos los cursos** con su categoría, estado, nota, avance, **vigencia**,
+**fecha de nota (emisión)** y la **URL directa del certificado** (`certificado_directo`).
 
-El enfoque correcto es mantener una **sesión (cookie)** e interactuar con las páginas
-como un navegador. Es lo que hace esta herramienta.
+La herramienta inicia sesión (manteniendo la cookie), **consume ese JSON directamente**
+—mucho más robusto que scrapear HTML— y de ahí calcula vencimientos y descarga los
+certificados (`certificado.php?id=<id_curso>&rut=<rut>`). También recoge el certificado
+de **firma digital** cuando existe.
 
 ---
 
 ## Categorías
 
-Los certificados se guardan en **dos niveles de carpetas**:
+Los certificados se guardan en **dos niveles de carpetas**: la **categoría real** de la
+plataforma (nivel 1) y el **prefijo** del curso (nivel 2):
 
 ```
 salida/certificados/
-├── Aulas Virtuales/
-│   ├── Seguridad y Salud Ocupacional/
-│   ├── Operaciones Planta Concentradora y-o Catodo/
-│   └── Mantenimiento Mina/
-└── E-Learning/
-    ├── TRANSV/        (Transversales)
-    ├── OM/            (Operación Mina)
-    ├── EDC/           (Estándares de Control)
-    ├── MA/            (Medio Ambiente)
-    ├── DI/  DM/  MANT/  MUELLE/  OPC/  EO/  FIN/
-    └── Otros/         (sin prefijo reconocible)
+├── SEGURIDAD Y SALUD OCUPACIONAL/
+│   ├── EDC/
+│   └── TRANSV/
+├── OPERACIONES MINA MANUAL Y-O AUTONOMA/
+│   └── OM/
+├── OPERACIONES PLANTA CONCENTRADORA Y-O CATODO/
+│   └── OPC/
+├── SUSTENTABILIDAD Y MEDIO AMBIENTE/
+│   └── MA/
+├── MANTENIMIENTO MINA/   MUELLE/   DIVERSIDAD E INCLUSION/   ...
 ```
 
-- **Nivel 1 (modalidad):** `Aulas Virtuales` o `E-Learning`, según el nombre del curso.
-- **Nivel 2 (subcategoría):**
-  - E-Learning → el **prefijo** del curso (TRANSV, OM, EDC, DI, DM, MA, MANT, MUELLE,
-    OPC, EO, FIN…). Si no hay prefijo → `Otros`.
-  - Aulas Virtuales → el **área** (SSO / Operaciones Planta / Mantenimiento Mina).
+- **Nivel 1 (categoría):** la categoría real que entrega la plataforma (p. ej.
+  `SEGURIDAD Y SALUD OCUPACIONAL`, `OPERACIONES PLANTA CONCENTRADORA Y/O CÁTODO`).
+- **Nivel 2 (subcategoría):** el **prefijo** del curso (TRANSV, OM, EDC, MA, DI, DM,
+  MANT, MUELLE, OPC, EO, FIN…); si no hay prefijo → `Otros`.
 
-Las mismas columnas (Modalidad y Subcategoría) aparecen en el Excel, con filtros.
+Solo se descargan los certificados de cursos **APROBADOS** (los demás no tienen
+certificado emitido), pero todos los cursos aparecen en el Excel.
 
 ---
 
@@ -117,10 +120,11 @@ Credenciales: en `config.ini` (ignorado por git), por variables de entorno
 
 ## El Excel
 
-Hoja **“Certificados”**: Modalidad, Subcategoría, Curso, Estado, Situación, Fecha de
-emisión, Fecha de vencimiento, Días para vencer, ID curso, RUT, Archivo PDF, URL.
-Colores: 🔴 vencido · 🟡 por vencer (≤ 60 días) · 🟢 vigente.
-Hoja **“Resumen”**: totales por situación y por modalidad.
+Hoja **“Certificados”**: Categoría, Subcategoría, Curso, Estado, Situación, Nota %,
+Avance %, Vigencia, Fecha de emisión, Fecha de vencimiento, Días para vencer, ID curso,
+RUT, Cert. firma digital, Archivo PDF, URL.
+Colores: 🔴 vencido/reprobado · 🟡 por vencer (≤ 60 días) · 🟢 vigente / vigencia fija.
+Hoja **“Resumen”**: totales por situación y por categoría.
 
 ---
 

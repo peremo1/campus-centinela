@@ -33,9 +33,11 @@ Uso CLI:
 """
 
 import argparse
+import calendar
 import configparser
 import datetime as dt
 import getpass
+import json
 import logging
 import os
 import re
@@ -66,6 +68,21 @@ RUTA_PORTADA = "/portada"
 RUTA_PROGRESO = "/progreso-cursos"
 # Ruta del generador de certificados (segun el ejemplo del usuario).
 PLANTILLA_CERT = "/lms/certificados/2_descarga_certificado/certificado.php?id={id}&rut={rut}"
+# API JSON interna que usa la pagina de progreso para traer los cursos.
+RUTA_JSON = ("/index.php?option=com_ajax&module=customphp&"
+             "method=consultorcursosSegundaVersion&format=json&rut={rut}")
+RUTA_FIRMA = "/lms/firmadigital/documento.php?IdDoc={id}"
+
+# Cursos de "vigencia fija" (no vencen) - tal cual los marca la plataforma.
+VIGENCIA_FIJA = {65, 68, 69, 70, 73, 75, 76, 79, 121, 207, 293, 294, 325, 1398,
+                 1399, 1411, 2180, 2181, 2457, 2619, 2621, 2623, 2625, 2626,
+                 2628, 2629, 2630, 2631, 2633, 2637}
+# Categorias que la plataforma excluye de "Mis Cursos Generales".
+EXCLUIR_CAT = {28, 38, 39, 40, 41, 63, 64, 65, 87, 88, 89, 92, 93, 94, 96, 97,
+               99, 100, 101, 102, 103, 104, 109, 27, 67, 52, 69, 86, 105, 106,
+               107, 108, 111, 138, 139, 140, 141}
+# Cursos individuales que la plataforma oculta.
+SKIP_CURSO = {2594}
 
 RE_FECHA = re.compile(r"\b(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2,4})\b")
 # Cualquier URL que contenga certificado.php
@@ -157,6 +174,102 @@ def clasificar_curso(nombre: str):
     if primer.isupper() and primer.isalpha() and 2 <= len(primer) <= 7:
         return "E-Learning", pref
     return "E-Learning", "Otros"
+
+
+def subcategoria_de(nombre: str) -> str:
+    """Subcategoria (prefijo) de un curso: TRANSV, OM, EDC, MA, ... u 'Otros'."""
+    return clasificar_curso(nombre)[1]
+
+
+# --------------------------------------------------------------------------- #
+# Ayudantes para la API JSON (fechas, vigencia)
+# --------------------------------------------------------------------------- #
+
+def _num_inicial(texto: str) -> int:
+    m = re.search(r"\d+", texto or "")
+    return int(m.group()) if m else 0
+
+
+def _parse_fecha_iso(valor) -> "dt.date|None":
+    """Parsea 'YYYY-MM-DD[ HH:MM:SS]' o 'DD-MM-YYYY' a date."""
+    s = str(valor or "").strip()
+    if not s or s in ("0000-00-00", "0000-00-00 00:00:00"):
+        return None
+    m = re.search(r"(\d{4})-(\d{1,2})-(\d{1,2})", s)
+    if m:
+        try:
+            return dt.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except ValueError:
+            return None
+    m = re.search(r"(\d{1,2})[/\-](\d{1,2})[/\-](\d{4})", s)
+    if m:
+        try:
+            return dt.date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+        except ValueError:
+            return None
+    return None
+
+
+def _add_years(d: dt.date, n: int) -> dt.date:
+    try:
+        return d.replace(year=d.year + n)
+    except ValueError:  # 29-feb
+        return d.replace(year=d.year + n, day=28)
+
+
+def _add_months(d: dt.date, n: int) -> dt.date:
+    total = d.month - 1 + n
+    y = d.year + total // 12
+    m = total % 12 + 1
+    day = min(d.day, calendar.monthrange(y, m)[1])
+    return dt.date(y, m, day)
+
+
+def _calcular_vencimiento(curso_id, vigencia, fecha_nota):
+    """Replica la logica de la plataforma: emision (fecha_nota) + vigencia.
+
+    Devuelve (fecha_vencimiento|None, vigencia_fija:bool).
+    """
+    try:
+        cid = int(str(curso_id).strip())
+    except (TypeError, ValueError):
+        cid = -1
+    if cid in VIGENCIA_FIJA:
+        return None, True
+    if not fecha_nota:
+        return None, False
+    v = _sin_acentos(str(vigencia or "")).lower()
+    if not v or "indefinid" in v:
+        return None, False
+    n = _num_inicial(v)
+    if n <= 0:
+        return None, False
+    if "ano" in v or "año" in str(vigencia or "").lower():
+        return _add_years(fecha_nota, n), False
+    if "mes" in v:
+        return _add_months(fecha_nota, n), False
+    return None, False
+
+
+def _desempaquetar_json(texto: str):
+    """Obtiene la lista de cursos desde la respuesta de com_ajax.
+
+    Formatos posibles: {"data":[...]}, {"data":"<json>"}, [...], [[...]].
+    """
+    raw = json.loads(texto)
+    data = raw.get("data", raw) if isinstance(raw, dict) else raw
+    if isinstance(data, str):
+        data = json.loads(data)
+    if (isinstance(data, list) and len(data) == 1
+            and isinstance(data[0], (list, str))):
+        inner = data[0]
+        if isinstance(inner, str):
+            inner = json.loads(inner)
+        if isinstance(inner, list):
+            data = inner
+    if not isinstance(data, list):
+        raise RuntimeError("La respuesta de cursos no tiene el formato esperado.")
+    return data
 
 
 # --------------------------------------------------------------------------- #
@@ -333,19 +446,28 @@ def _parece_pagina_login(html: str) -> bool:
 # --------------------------------------------------------------------------- #
 
 class Curso:
-    def __init__(self, curso_id, rut, nombre, modalidad, subcategoria,
-                 estado, fecha_emision, fecha_vencimiento, cert_url, texto_crudo):
-        self.curso_id = curso_id
+    def __init__(self, curso_id, rut, nombre, categoria, subcategoria, estado,
+                 nota, avance, vigencia, fecha_emision, fecha_vencimiento,
+                 cert_url, firma_url="", vigencia_fija=False):
+        self.curso_id = str(curso_id)
         self.rut = rut
         self.nombre = nombre
-        self.modalidad = modalidad
-        self.subcategoria = subcategoria
-        self.estado = estado
+        self.categoria = categoria          # curso_cat real de la plataforma
+        self.subcategoria = subcategoria    # prefijo (EDC, OM, MA, ...)
+        self.estado = (estado or "").upper()  # APROBADO / PENDIENTE / REPROBADO
+        self.nota = nota
+        self.avance = avance
+        self.vigencia = vigencia
         self.fecha_emision = fecha_emision
         self.fecha_vencimiento = fecha_vencimiento
         self.cert_url = cert_url
-        self.texto_crudo = texto_crudo
+        self.firma_url = firma_url
+        self.vigencia_fija = vigencia_fija
         self.archivo = None
+
+    @property
+    def aprobado(self):
+        return self.estado == "APROBADO"
 
     def dias_para_vencer(self):
         if not self.fecha_vencimiento:
@@ -353,9 +475,13 @@ class Curso:
         return (self.fecha_vencimiento - dt.date.today()).days
 
     def situacion(self):
+        if self.vigencia_fija:
+            return "VIGENCIA_FIJA"
+        if self.estado and self.estado != "APROBADO":
+            return self.estado  # PENDIENTE / REPROBADO / VENCIDO
         d = self.dias_para_vencer()
         if d is None:
-            return "SIN_FECHA"
+            return "VIGENTE" if self.estado == "APROBADO" else "SIN_FECHA"
         if d < 0:
             return "VENCIDO"
         if d <= 60:
@@ -363,114 +489,82 @@ class Curso:
         return "VIGENTE"
 
     def carpeta_relativa(self):
-        return Path(limpiar_nombre(self.modalidad, 40)) / limpiar_nombre(self.subcategoria, 50)
+        return (Path(limpiar_nombre(self.categoria, 50)) /
+                limpiar_nombre(self.subcategoria, 40))
 
     def nombre_archivo(self):
         return f"{limpiar_nombre(self.nombre, 90)}_id{self.curso_id}.pdf"
 
 
-def _fila_contenedora(enlace):
-    tr = enlace.find_parent("tr")
-    if tr:
-        return tr
-    nodo = enlace
-    for _ in range(6):
-        padre = nodo.find_parent(["div", "li", "article"])
-        if padre is None:
-            break
-        if len(padre.get_text(" ", strip=True)) > 25:
-            return padre
-        nodo = padre
-    return enlace.parent or enlace
+def obtener_cursos(session, cfg: Config, diag_dir=None):
+    """Obtiene los cursos desde la API JSON interna de la plataforma.
 
-
-def _nombre_curso(fila, enlace, curso_id):
-    # 1) Celdas de tabla: la mas larga que no sea solo una fecha.
-    celdas = fila.find_all(["td", "th"])
-    if celdas:
-        textos = [c.get_text(" ", strip=True) for c in celdas]
-        textos = [t for t in textos if t and not RE_FECHA.fullmatch(t)
-                  and "descarg" not in t.lower() and t.lower() not in ("pdf", "entrar")]
-        if textos:
-            return max(textos, key=len)
-    # 2) Encabezado o enlace dentro de la tarjeta.
-    enc = fila.find(["h1", "h2", "h3", "h4", "h5", "strong", "b", "a"])
-    if enc:
-        t = enc.get_text(" ", strip=True)
-        if t and "certificado.php" not in t:
-            return t
-    # 3) Texto del propio enlace.
-    t = enlace.get_text(" ", strip=True)
-    if t and t.lower() not in ("descargar", "pdf", "entrar", "entrar (ya inscrito)"):
-        return t
-    return f"Curso {curso_id}"
-
-
-def _recolectar_ids(soup):
-    """Devuelve dict id -> (tag, cert_url_o_None).
-
-    Busca certificado.php (preferente) y, en su defecto, cualquier enlace con
-    id de curso (land.php, course/view.php, mtype=course), ya que el id es el
-    mismo id de curso de Moodle y sirve para construir la URL del certificado.
+    La pagina /progreso-cursos no trae los cursos en el HTML: los carga por
+    AJAX desde el metodo 'consultorcursosSegundaVersion'. Consumimos ese JSON
+    directamente, que trae id, categoria, nombre, estado, nota, vigencia,
+    fecha_nota (emision) y certificado_directo.
     """
-    directos = {}   # id -> (tag, cert_url)
-    indirectos = {}  # id -> tag
-    for tag in soup.find_all(True):
-        for attr in ATRIBUTOS_URL:
-            val = tag.get(attr)
-            if not val:
-                continue
-            val = val.replace("&amp;", "&")
-            if "certificado.php" in val.lower():
-                m = RE_CERT_URL.search(val)
-                mid = RE_ID.search(val)
-                if mid:
-                    directos.setdefault(mid.group(1),
-                                        (tag, m.group(0) if m else None))
-                break
-            if ("land.php" in val.lower() or "course/view.php" in val.lower()
-                    or "mtype=course" in val.lower()):
-                mid = RE_ID.search(val)
-                if mid:
-                    indirectos.setdefault(mid.group(1), tag)
-                break
-    # Combinar: los directos mandan.
-    resultado = {}
-    for cid, (tag, cert) in directos.items():
-        resultado[cid] = (tag, cert)
-    for cid, tag in indirectos.items():
-        resultado.setdefault(cid, (tag, None))
-    return resultado
+    url = cfg.url_base + RUTA_JSON.format(rut=cfg.rut)
+    log.info("Consultando cursos (API interna)...")
+    r = session.get(url, timeout=TIMEOUT,
+                    headers={"X-Requested-With": "XMLHttpRequest",
+                             "Referer": cfg.url_base + RUTA_PROGRESO})
+    r.raise_for_status()
+    if diag_dir:
+        try:
+            Path(diag_dir).mkdir(parents=True, exist_ok=True)
+            (Path(diag_dir) / "cursos.json").write_text(r.text, encoding="utf-8")
+        except Exception:
+            pass
+    try:
+        data = _desempaquetar_json(r.text)
+    except Exception as e:
+        raise RuntimeError("No se pudieron leer los cursos (%s). Se guardo la "
+                           "respuesta en diagnostico/cursos.json para revisar." % e)
 
-
-def extraer_cursos(html: str, cfg: Config):
-    """Extrae la lista de cursos con certificado desde el HTML de progreso."""
-    soup = BeautifulSoup(html, "html.parser")
-    ids = _recolectar_ids(soup)
     cursos = []
-    for curso_id, (tag, cert_url) in ids.items():
-        fila = _fila_contenedora(tag)
-        texto = fila.get_text(" | ", strip=True)
-        nombre = _nombre_curso(fila, tag, curso_id)
-        modalidad, subcat = clasificar_curso(nombre)
-        fechas = todas_las_fechas(texto)
-        f_emision = fechas[0] if len(fechas) >= 1 else None
-        f_venc = fechas[1] if len(fechas) >= 2 else None
-        estado = ""
-        for palabra in ("vencido", "vigente", "por vencer", "aprobado", "pendiente"):
-            if palabra in texto.lower():
-                estado = palabra
-                break
-        url = urljoin(cfg.url_base, cert_url) if cert_url else cfg.url_certificado(curso_id)
-        cursos.append(Curso(curso_id, cfg.rut, nombre, modalidad, subcat, estado,
-                            f_emision, f_venc, url, texto))
+    for a in data:
+        if not isinstance(a, dict):
+            continue
+        if str(a.get("s")) == "1" or str(a.get("d")) == "1":
+            continue  # marcado como eliminado
+        cat_id = _num_inicial(str(a.get("cat_id", "0")))
+        if cat_id in EXCLUIR_CAT:
+            continue
+        curso_id = str(a.get("curso_id", "")).strip()
+        try:
+            if int(curso_id) in SKIP_CURSO:
+                continue
+        except ValueError:
+            pass
 
-    cursos.sort(key=lambda c: (c.modalidad, c.subcategoria, c.nombre.lower()))
-    log.info("Se detectaron %d cursos con id de certificado.", len(cursos))
+        nombre = (a.get("curso_nombre") or "").strip() or ("Curso " + curso_id)
+        categoria = (a.get("curso_cat") or "").strip() or "Sin categoria"
+        subcat = subcategoria_de(nombre)
+        estado = (a.get("estado_curso") or "").strip().upper()
+        vigencia = (a.get("vigencia") or "").strip()
+        fecha_emision = _parse_fecha_iso(a.get("fecha_nota"))
+        fecha_venc, fija = _calcular_vencimiento(curso_id, vigencia, fecha_emision)
+
+        cert = (a.get("certificado_directo") or "").strip().replace("&amp;", "&")
+        if cert:
+            cert = urljoin(cfg.url_base + "/", cert)
+        elif curso_id:
+            cert = cfg.url_certificado(curso_id)
+        firma = str(a.get("firma_digital", "0")).strip()
+        firma_url = (cfg.url_base + RUTA_FIRMA.format(id=firma)
+                     if firma and firma != "0" else "")
+
+        cursos.append(Curso(
+            curso_id, cfg.rut, nombre, categoria, subcat, estado,
+            a.get("notobt", ""), a.get("porcentaje_avance", ""), vigencia,
+            fecha_emision, fecha_venc, cert, firma_url, fija))
+
+    cursos.sort(key=lambda c: (c.categoria.lower(), c.subcategoria, c.nombre.lower()))
+    log.info("Se obtuvieron %d cursos (%d aprobados con certificado).",
+             len(cursos), sum(1 for c in cursos if c.aprobado))
     if not cursos:
-        log.warning("No se detectaron ids de curso/certificado. El HTML puede ser "
-                    "distinto o cargarse por JavaScript. Usa --dump y revisa "
-                    "diagnostico/progreso-cursos.html.")
+        log.warning("La API no devolvio cursos. Revisa diagnostico/cursos.json.")
     return cursos
 
 
@@ -483,6 +577,10 @@ def descargar_certificados(session, cfg, cursos, carpeta_base: Path, progreso_cb
     ok = 0
     total = len(cursos)
     for i, curso in enumerate(cursos, 1):
+        if not curso.aprobado:
+            if progreso_cb:
+                progreso_cb(i, total)
+            continue  # sin certificado emitido (pendiente/reprobado)
         destino_dir = carpeta_base / curso.carpeta_relativa()
         destino_dir.mkdir(parents=True, exist_ok=True)
         destino = destino_dir / curso.nombre_archivo()
@@ -520,9 +618,10 @@ def generar_excel(cursos, ruta_xlsx: Path):
     wb = Workbook()
     ws = wb.active
     ws.title = "Certificados"
-    encabezados = ["Modalidad", "Subcategoria", "Curso", "Estado", "Situacion",
-                   "Fecha emision", "Fecha vencimiento", "Dias para vencer",
-                   "ID curso", "RUT", "Archivo PDF", "URL certificado"]
+    encabezados = ["Categoria", "Subcategoria", "Curso", "Estado", "Situacion",
+                   "Nota %", "Avance %", "Vigencia", "Fecha emision",
+                   "Fecha vencimiento", "Dias para vencer", "ID curso", "RUT",
+                   "Cert. firma digital", "Archivo PDF", "URL certificado"]
     ws.append(encabezados)
 
     cab_fill = PatternFill("solid", fgColor="0B6E7A")
@@ -533,59 +632,80 @@ def generar_excel(cursos, ruta_xlsx: Path):
         c.font = cab_font
         c.alignment = Alignment(vertical="center")
 
-    rojo = PatternFill("solid", fgColor="F4CCCC")
-    amarillo = PatternFill("solid", fgColor="FCE8B2")
-    verde = PatternFill("solid", fgColor="D9EAD3")
+    rellenos = {
+        "VENCIDO": PatternFill("solid", fgColor="F4CCCC"),
+        "POR_VENCER": PatternFill("solid", fgColor="FCE8B2"),
+        "VIGENTE": PatternFill("solid", fgColor="D9EAD3"),
+        "VIGENCIA_FIJA": PatternFill("solid", fgColor="D9EAD3"),
+        "REPROBADO": PatternFill("solid", fgColor="F4CCCC"),
+        "PENDIENTE": PatternFill("solid", fgColor="EDEDED"),
+    }
 
     def clave(c):
         d = c.dias_para_vencer()
-        return (c.modalidad, c.subcategoria, d if d is not None else 10**6)
+        return (c.categoria.lower(), c.subcategoria, d if d is not None else 10**6)
 
     for curso in sorted(cursos, key=clave):
         sit = curso.situacion()
         ws.append([
-            curso.modalidad, curso.subcategoria, curso.nombre, curso.estado, sit,
+            curso.categoria, curso.subcategoria, curso.nombre, curso.estado, sit,
+            curso.nota, curso.avance, curso.vigencia,
             curso.fecha_emision.strftime("%d-%m-%Y") if curso.fecha_emision else "",
             curso.fecha_vencimiento.strftime("%d-%m-%Y") if curso.fecha_vencimiento else "",
             curso.dias_para_vencer() if curso.dias_para_vencer() is not None else "",
-            curso.curso_id, curso.rut, curso.archivo or "", curso.cert_url,
+            curso.curso_id, curso.rut, curso.firma_url, curso.archivo or "",
+            curso.cert_url,
         ])
-        relleno = {"VENCIDO": rojo, "POR_VENCER": amarillo, "VIGENTE": verde}.get(sit)
+        relleno = rellenos.get(sit)
         if relleno:
             for col in range(1, len(encabezados) + 1):
                 ws.cell(row=ws.max_row, column=col).fill = relleno
 
-    for i, ancho in enumerate([16, 22, 50, 12, 12, 14, 16, 15, 9, 13, 42, 50], 1):
+    anchos = [30, 14, 48, 12, 14, 8, 9, 14, 14, 16, 15, 9, 13, 40, 40, 46]
+    for i, ancho in enumerate(anchos, 1):
         ws.column_dimensions[get_column_letter(i)].width = ancho
     ws.freeze_panes = "A2"
     ws.auto_filter.ref = f"A1:{get_column_letter(len(encabezados))}{ws.max_row}"
 
+    # Resumen
     resumen = wb.create_sheet("Resumen")
-    conteo = {"VENCIDO": 0, "POR_VENCER": 0, "VIGENTE": 0, "SIN_FECHA": 0}
-    por_modalidad = {}
+    conteo = {}
+    por_categoria = {}
     for c in cursos:
-        conteo[c.situacion()] += 1
-        por_modalidad[c.modalidad] = por_modalidad.get(c.modalidad, 0) + 1
+        s = c.situacion()
+        conteo[s] = conteo.get(s, 0) + 1
+        por_categoria[c.categoria] = por_categoria.get(c.categoria, 0) + 1
     resumen.append(["Generado", dt.datetime.now().strftime("%d-%m-%Y %H:%M")])
     resumen.append(["Total cursos", len(cursos)])
     resumen.append([])
     resumen.append(["Situacion", "Cantidad"])
-    for k in ("VENCIDO", "POR_VENCER", "VIGENTE", "SIN_FECHA"):
-        resumen.append([k, conteo[k]])
+    orden = ["VENCIDO", "POR_VENCER", "VIGENTE", "VIGENCIA_FIJA", "PENDIENTE",
+             "REPROBADO", "SIN_FECHA"]
+    for k in orden:
+        if k in conteo:
+            resumen.append([k, conteo[k]])
+    for k in sorted(conteo):
+        if k not in orden:
+            resumen.append([k, conteo[k]])
     resumen.append([])
-    resumen.append(["Modalidad", "Cantidad"])
-    for k, v in sorted(por_modalidad.items()):
+    resumen.append(["Categoria", "Cantidad"])
+    for k, v in sorted(por_categoria.items()):
         resumen.append([k, v])
-    resumen.column_dimensions["A"].width = 24
-    resumen.column_dimensions["B"].width = 22
-    for celda in ("A4", "B4", "A10", "B10"):
-        resumen[celda].font = Font(bold=True)
+    resumen.column_dimensions["A"].width = 32
+    resumen.column_dimensions["B"].width = 12
+    resumen["A4"].font = Font(bold=True)
+    resumen["B4"].font = Font(bold=True)
 
     ruta_xlsx.parent.mkdir(parents=True, exist_ok=True)
     wb.save(ruta_xlsx)
     log.info("Excel generado: %s", ruta_xlsx)
-    log.info("Vencidos: %d | Por vencer (<=60d): %d | Vigentes: %d | Sin fecha: %d",
-             conteo["VENCIDO"], conteo["POR_VENCER"], conteo["VIGENTE"], conteo["SIN_FECHA"])
+    log.info("Vencidos: %d | Por vencer (<=60d): %d | Vigentes: %d | Fija: %d",
+             conteo.get("VENCIDO", 0), conteo.get("POR_VENCER", 0),
+             conteo.get("VIGENTE", 0), conteo.get("VIGENCIA_FIJA", 0))
+    # Normalizamos para el resumen de la GUI
+    conteo.setdefault("VENCIDO", 0)
+    conteo.setdefault("POR_VENCER", 0)
+    conteo.setdefault("VIGENTE", 0)
     return conteo
 
 
@@ -623,10 +743,7 @@ def ejecutar(cfg: Config, dump=False, sin_descarga=False, progreso_cb=None):
     login(session, cfg, diag_dir=base / "diagnostico")
     if dump:
         guardar_diagnostico(session, cfg, base / "diagnostico")
-    log.info("Leyendo pagina de progreso de cursos...")
-    r = session.get(cfg.url_base + RUTA_PROGRESO, timeout=TIMEOUT)
-    r.raise_for_status()
-    cursos = extraer_cursos(r.text, cfg)
+    cursos = obtener_cursos(session, cfg, diag_dir=base / "diagnostico")
     if not cursos:
         return [], None, {}
     if not sin_descarga:
