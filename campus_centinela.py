@@ -661,6 +661,12 @@ def generar_excel(cursos, ruta_xlsx: Path, nombre="", rut="", umbral=60):
     link_font = Font(color="0563C1", underline="single")
     borde = Border(*(Side(style="thin", color="D0D7DA"),) * 4)
 
+    def cf_fill(color):
+        # En formato condicional, Excel (web/escritorio) y Google Sheets usan
+        # el bgColor del relleno. Fijamos fg y bg al mismo color para que se
+        # pinte en TODOS (LibreOffice, Excel y Sheets).
+        return PatternFill(start_color=color, end_color=color, fill_type="solid")
+
     wb = Workbook()
     panel = wb.active
     panel.title = "Panel"
@@ -735,23 +741,20 @@ def generar_excel(cursos, ruta_xlsx: Path, nombre="", rut="", umbral=60):
     for etiqueta, color in COLORES.items():
         ws.conditional_formatting.add(rango, FormulaRule(
             formula=[f'$G2="{etiqueta}"'], stopIfTrue=False,
-            fill=PatternFill("solid", fgColor=color)))
+            fill=cf_fill(color)))
 
     # Refuerzo: pinta la casilla "Dias restantes" (F) por su propio numero
     # (rojo si vencio, amarillo si quedan <= umbral, verde si quedan mas).
     fcol = f"F2:F{nfilas}"
     ws.conditional_formatting.add(fcol, FormulaRule(
         formula=['AND($F2<>"",$F2<0)'], stopIfTrue=True,
-        fill=PatternFill("solid", fgColor="F4CCCC"),
-        font=Font(bold=True, color="9C2A2A")))
+        fill=cf_fill("F4CCCC"), font=Font(bold=True, color="9C2A2A")))
     ws.conditional_formatting.add(fcol, FormulaRule(
         formula=[f'AND($F2<>"",$F2<={UMBRAL})'], stopIfTrue=True,
-        fill=PatternFill("solid", fgColor="FCE8B2"),
-        font=Font(bold=True, color="8A6D1A")))
+        fill=cf_fill("FCE8B2"), font=Font(bold=True, color="8A6D1A")))
     ws.conditional_formatting.add(fcol, FormulaRule(
         formula=[f'AND($F2<>"",$F2>{UMBRAL})'], stopIfTrue=True,
-        fill=PatternFill("solid", fgColor="D9EAD3"),
-        font=Font(bold=True, color="2E6B23")))
+        fill=cf_fill("D9EAD3"), font=Font(bold=True, color="2E6B23")))
 
     # -------------------- Hoja "Panel" --------------------
     panel.sheet_view.showGridLines = False
