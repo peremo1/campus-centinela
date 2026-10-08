@@ -669,7 +669,7 @@ def generar_excel(cursos, ruta_xlsx: Path, nombre="", rut="", umbral=60):
     # -------------------- Hoja "Cursos" (detalle) --------------------
     enc = ["Categoria", "Subcategoria", "Curso", "Fecha de nota", "Expiracion",
            "Dias restantes", "Situacion", "Nota %", "Avance %", "Vigencia",
-           "Estado", "Archivo PDF", "URL certificado", "Firma digital"]
+           "Estado", "Archivo PDF", "URL certificado"]
     ws.append(enc)
     for col in range(1, len(enc) + 1):
         c = ws.cell(row=1, column=col)
@@ -718,18 +718,13 @@ def generar_excel(cursos, ruta_xlsx: Path, nombre="", rut="", umbral=60):
         if c.aprobado and c.cert_url:
             cm.hyperlink = c.cert_url
             cm.font = link_font
-        # Certificado de firma digital (solo algunos cursos lo tienen)
-        cn = ws.cell(r, 14, "Descargar firma digital" if c.firma_url else "")
-        if c.firma_url:
-            cn.hyperlink = c.firma_url
-            cn.font = link_font
         for col in range(1, len(enc) + 1):
             ws.cell(r, col).border = borde
         s = _situacion_snapshot(c, hoy, umbral)
         snap[s] = snap.get(s, 0) + 1
     nfilas = r
 
-    anchos = [34, 13, 46, 13, 12, 13, 13, 7, 8, 13, 12, 36, 44, 40]
+    anchos = [34, 13, 46, 13, 12, 13, 13, 7, 8, 13, 12, 36, 44]
     for i, ancho in enumerate(anchos, 1):
         ws.column_dimensions[get_column_letter(i)].width = ancho
     ws.freeze_panes = "A2"

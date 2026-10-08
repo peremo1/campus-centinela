@@ -130,7 +130,8 @@ El Excel tiene **dos hojas**:
   **Días restantes** y **Situación**. “Días restantes” es una **fórmula dinámica**
   (`= Expiración − HOY()`) que lee el reloj del PC, y la fila se **colorea sola** según el
   umbral del Panel: 🟢 vigente (> umbral) · 🟡 por vencer (≤ umbral) · 🔴 vencida ·
-  ⬜ indefinida/fija. Columnas extra: Nota %, Avance %, Vigencia, Estado, PDF, URL, firma.
+  ⬜ indefinida/fija. Columnas extra: Nota %, Avance %, Vigencia, Estado, y enlaces al
+  PDF local (si lo descargaste) y a la URL del certificado online.
 
 Como todo es por fórmula, basta **reabrir el Excel** (o cambiar el 60 de la celda C8)
 para ver el estado actualizado sin volver a ejecutar el programa.
