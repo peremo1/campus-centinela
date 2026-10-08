@@ -40,6 +40,7 @@ import logging
 import os
 import re
 import sys
+import time
 import unicodedata
 from pathlib import Path
 from urllib.parse import urljoin, urlparse, parse_qs
@@ -97,6 +98,12 @@ def limpiar_nombre(texto: str, maximo: int = 120) -> str:
     texto = re.sub(r'[\\/:*?"<>|]+', "-", texto)
     texto = texto.strip(" .-")
     return (texto or "sin_nombre")[:maximo]
+
+
+def normalizar_rut(valor: str) -> str:
+    """Limpia un RUT/usuario: quita puntos y espacios y pasa a mayusculas.
+    Conserva el guion. Ej: ' 21.080.196-0 ' -> '21080196-0'."""
+    return (valor or "").strip().replace(".", "").replace(" ", "").upper()
 
 
 def todas_las_fechas(texto: str):
@@ -158,9 +165,9 @@ def clasificar_curso(nombre: str):
 
 class Config:
     def __init__(self, usuario, contrasena, rut, carpeta_salida, url_base):
-        self.usuario = usuario
+        self.usuario = normalizar_rut(usuario)
         self.contrasena = contrasena
-        self.rut = (rut or usuario).strip()
+        self.rut = normalizar_rut(rut) or self.usuario
         self.carpeta_salida = carpeta_salida
         self.url_base = url_base.rstrip("/")
 
@@ -226,18 +233,20 @@ def _buscar_formulario_login(soup):
     return None
 
 
-def login(session: requests.Session, cfg: Config) -> None:
-    """Inicia sesion reenviando TODOS los campos ocultos del formulario real
-    (incluye el token CSRF dinamico de Joomla)."""
+def _intentar_login(session: requests.Session, cfg: Config) -> bool:
+    """Un intento de login. Devuelve True si quedo autenticado.
+
+    Reenvia TODOS los campos ocultos del formulario real (token CSRF de Joomla
+    incluido) y verifica consultando /progreso-cursos.
+    """
     url_login = cfg.url_base + RUTA_LOGIN
-    log.info("Abriendo pagina de login...")
     r = session.get(url_login, timeout=TIMEOUT)
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
     form = _buscar_formulario_login(soup)
     if form is None:
         raise RuntimeError("No se encontro el formulario de login. Revisa la URL base "
-                           "o usa --dump para guardar el HTML.")
+                           "o usa Diagnostico para guardar el HTML.")
     action = urljoin(url_login, form.get("action") or url_login)
     datos = {}
     for inp in form.find_all(["input", "button"]):
@@ -247,16 +256,37 @@ def login(session: requests.Session, cfg: Config) -> None:
     datos["username"] = cfg.usuario
     datos["password"] = cfg.contrasena
     datos["remember"] = "yes"
-    log.debug("POST login a %s | campos: %s", action,
-              ", ".join(sorted(k for k in datos if k != "password")))
-    resp = session.post(action, data=datos, timeout=TIMEOUT, allow_redirects=True)
+    resp = session.post(action, data=datos, timeout=TIMEOUT, allow_redirects=True,
+                        headers={"Referer": url_login})
     resp.raise_for_status()
-
     verif = session.get(cfg.url_base + RUTA_PROGRESO, timeout=TIMEOUT)
-    if _parece_pagina_login(verif.text):
-        raise RuntimeError("Login no exitoso (la plataforma devolvio el formulario de "
-                           "acceso). Revisa usuario/contrasena o usa --dump.")
-    log.info("Sesion iniciada correctamente.")
+    return not _parece_pagina_login(verif.text)
+
+
+def login(session: requests.Session, cfg: Config, intentos: int = 4) -> None:
+    """Login con reintentos.
+
+    El sitio rechaza de forma intermitente el primer POST (se observa que un
+    segundo intento entra). Por eso se reintenta con la sesion limpia hasta
+    'intentos' veces antes de darse por vencido.
+    """
+    log.info("Abriendo pagina de login...")
+    for intento in range(1, intentos + 1):
+        try:
+            if _intentar_login(session, cfg):
+                log.info("Sesion iniciada correctamente.")
+                return
+            log.warning("La plataforma no acepto el acceso (intento %d/%d). "
+                        "Reintentando...", intento, intentos)
+        except requests.RequestException as e:
+            log.warning("Problema de red en el login (intento %d/%d): %s",
+                        intento, intentos, e)
+        session.cookies.clear()
+        time.sleep(min(2 * intento, 6))
+    raise RuntimeError(
+        "No se pudo iniciar sesion tras %d intentos. Revisa el RUT y la contrasena. "
+        "Si usas documento extranjero, verifica que esa sea la credencial correcta."
+        % intentos)
 
 
 def _parece_pagina_login(html: str) -> bool:
@@ -553,8 +583,14 @@ def ejecutar(cfg: Config, dump=False, sin_descarga=False, progreso_cb=None):
     session = crear_sesion()
     login(session, cfg)
     base = Path(cfg.carpeta_salida)
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise RuntimeError(
+            "No se pudo crear la carpeta de salida '%s' (%s). Elige una carpeta "
+            "con permisos de escritura, por ejemplo en Documentos." % (base, e))
     if dump:
-        guardar_diagnostico(session, cfg, Path("diagnostico"))
+        guardar_diagnostico(session, cfg, base / "diagnostico")
     log.info("Leyendo pagina de progreso de cursos...")
     r = session.get(cfg.url_base + RUTA_PROGRESO, timeout=TIMEOUT)
     r.raise_for_status()

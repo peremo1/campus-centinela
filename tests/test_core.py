@@ -146,9 +146,21 @@ def test_excel():
           f"conteo={conteo}")
 
 
+def test_normalizar_rut():
+    assert cc.normalizar_rut(" 21.080.196-0 ") == "21080196-0"
+    assert cc.normalizar_rut("12.345.678-k") == "12345678-K"
+    assert cc.normalizar_rut("21080196-0") == "21080196-0"
+    # El RUT del certificado se deriva del usuario cuando no se entrega.
+    c = cc.Config(usuario="21.080.196-0", contrasena="x", rut="",
+                  carpeta_salida="salida", url_base="https://www.campuscentinela.cl")
+    assert c.usuario == "21080196-0" and c.rut == "21080196-0"
+    print("[OK] normalizacion de RUT y derivacion del rut de certificado")
+
+
 if __name__ == "__main__":
     fallos = 0
-    for fn in (test_clasificacion, test_extraccion, test_fechas_y_carpetas, test_excel):
+    for fn in (test_clasificacion, test_extraccion, test_fechas_y_carpetas, test_excel,
+               test_normalizar_rut):
         try:
             fn()
         except AssertionError as e:

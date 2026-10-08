@@ -42,6 +42,13 @@ GRIS = "#F2F5F6"
 BLANCO = "#FFFFFF"
 
 
+def _carpeta_default():
+    """Carpeta de salida por defecto, en un lugar con permisos de escritura."""
+    docs = Path.home() / "Documents"
+    base = docs if docs.exists() else Path.home()
+    return str(base / "CampusCentinela")
+
+
 class ColaLogHandler(logging.Handler):
     """Envia los mensajes de log a una cola para mostrarlos en la ventana."""
     def __init__(self, cola):
@@ -118,24 +125,17 @@ class App(ttk.Frame):
         ttk.Checkbutton(form, text="Ver", variable=self.var_ver,
                         command=self._toggle_pass).grid(row=1, column=2, padx=(8, 0))
 
-        ttk.Label(form, text="RUT en certificado:").grid(row=2, column=0, sticky="w", pady=4)
-        self.var_rut = tk.StringVar()
-        ttk.Entry(form, textvariable=self.var_rut).grid(
-            row=2, column=1, columnspan=2, sticky="ew", pady=4, padx=(8, 0))
-        ttk.Label(form, text="(dejar vacio = usar el mismo RUT de arriba)",
-                  foreground="#666").grid(row=3, column=1, columnspan=2, sticky="w")
-
-        ttk.Label(form, text="Carpeta de salida:").grid(row=4, column=0, sticky="w", pady=4)
-        self.var_salida = tk.StringVar(value="salida")
+        ttk.Label(form, text="Carpeta de salida:").grid(row=2, column=0, sticky="w", pady=4)
+        self.var_salida = tk.StringVar(value=_carpeta_default())
         ttk.Entry(form, textvariable=self.var_salida).grid(
-            row=4, column=1, sticky="ew", pady=4, padx=(8, 0))
+            row=2, column=1, sticky="ew", pady=4, padx=(8, 0))
         ttk.Button(form, text="Examinar...", command=self._elegir_carpeta,
-                   style="TButton").grid(row=4, column=2, padx=(8, 0))
+                   style="TButton").grid(row=2, column=2, padx=(8, 0))
 
         self.var_guardar = tk.BooleanVar(value=True)
         ttk.Checkbutton(form, text="Recordar datos en config.ini (no incluye el .exe)",
                         variable=self.var_guardar).grid(
-            row=5, column=1, columnspan=2, sticky="w", pady=(6, 0))
+            row=3, column=1, columnspan=2, sticky="w", pady=(6, 0))
 
         # --- Botones de accion ---
         acciones = ttk.Frame(cuerpo)
@@ -207,16 +207,15 @@ class App(ttk.Frame):
             cp.read(ruta, encoding="utf-8")
             self.var_usuario.set(cp.get("credenciales", "usuario", fallback=""))
             self.var_pass.set(cp.get("credenciales", "contrasena", fallback=""))
-            self.var_rut.set(cp.get("credenciales", "rut", fallback=""))
-            self.var_salida.set(cp.get("opciones", "carpeta_salida", fallback="salida"))
+            self.var_salida.set(cp.get("opciones", "carpeta_salida",
+                                       fallback=_carpeta_default()))
             self._log("Datos cargados desde config.ini")
         except Exception as e:
             self._log("No se pudo leer config.ini: %s" % e)
 
     def _guardar_config(self, cfg):
         cp = configparser.ConfigParser()
-        cp["credenciales"] = {"usuario": cfg.usuario, "contrasena": cfg.contrasena,
-                              "rut": self.var_rut.get().strip()}
+        cp["credenciales"] = {"usuario": cfg.usuario, "contrasena": cfg.contrasena}
         cp["opciones"] = {"carpeta_salida": cfg.carpeta_salida, "url_base": cfg.url_base}
         try:
             with open(self._ruta_config(), "w", encoding="utf-8") as f:
@@ -232,9 +231,8 @@ class App(ttk.Frame):
             messagebox.showwarning("Faltan datos",
                                    "Ingresa el RUT/usuario y la contrasena.")
             return None
-        return cc.Config(usuario=usuario, contrasena=contrasena,
-                         rut=self.var_rut.get().strip(),
-                         carpeta_salida=self.var_salida.get().strip() or "salida",
+        return cc.Config(usuario=usuario, contrasena=contrasena, rut="",
+                         carpeta_salida=self.var_salida.get().strip() or _carpeta_default(),
                          url_base="https://www.campuscentinela.cl")
 
     def _accion_completa(self):
