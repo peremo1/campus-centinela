@@ -120,11 +120,20 @@ Credenciales: en `config.ini` (ignorado por git), por variables de entorno
 
 ## El Excel
 
-Hoja **“Certificados”**: Categoría, Subcategoría, Curso, Estado, Situación, Nota %,
-Avance %, Vigencia, Fecha de emisión, Fecha de vencimiento, Días para vencer, ID curso,
-RUT, Cert. firma digital, Archivo PDF, URL.
-Colores: 🔴 vencido/reprobado · 🟡 por vencer (≤ 60 días) · 🟢 vigente / vigencia fija.
-Hoja **“Resumen”**: totales por situación y por categoría.
+El Excel tiene **dos hojas**:
+
+- **“Panel”** (se abre primero): datos del trabajador (nombre, RUT), un **parámetro
+  editable** — *Días de aviso (por vencer)* en la celda **C8**, por defecto 60 — y los
+  **KPIs** (Vigentes / Por vencer / Vencidos / Indefinidos / Pendientes) y totales por
+  categoría, todos con fórmulas que **se recalculan al abrir**.
+- **“Cursos”**: tabla ordenada por categoría con Curso, **Fecha de nota**, **Expiración**,
+  **Días restantes** y **Situación**. “Días restantes” es una **fórmula dinámica**
+  (`= Expiración − HOY()`) que lee el reloj del PC, y la fila se **colorea sola** según el
+  umbral del Panel: 🟢 vigente (> umbral) · 🟡 por vencer (≤ umbral) · 🔴 vencida ·
+  ⬜ indefinida/fija. Columnas extra: Nota %, Avance %, Vigencia, Estado, PDF, URL, firma.
+
+Como todo es por fórmula, basta **reabrir el Excel** (o cambiar el 60 de la celda C8)
+para ver el estado actualizado sin volver a ejecutar el programa.
 
 ---
 

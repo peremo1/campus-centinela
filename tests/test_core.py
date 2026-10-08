@@ -178,14 +178,38 @@ def test_excel():
     out = Path(tempfile.gettempdir()) / "test_centinela.xlsx"
     if out.exists():
         out.unlink()
-    conteo = cc.generar_excel(cursos, out)
+    conteo = cc.generar_excel(cursos, out, nombre="Jonathan Veliz Soza",
+                              rut="21080196-0", umbral=60)
     assert out.exists() and out.stat().st_size > 0
     from openpyxl import load_workbook
-    ws = load_workbook(out)["Certificados"]
+    wb = load_workbook(out)
+    assert "Panel" in wb.sheetnames and "Cursos" in wb.sheetnames
+    assert wb.sheetnames[0] == "Panel"
+
+    ws = wb["Cursos"]
     enc = [c.value for c in ws[1]]
-    assert enc[0] == "Categoria" and "Vigencia" in enc and "Nota %" in enc
+    assert enc[0] == "Categoria"
+    assert "Dias restantes" in enc and "Situacion" in enc and "Expiracion" in enc
+
+    # Debe existir al menos una formula dinamica (Dias restantes = Exp - HOY())
+    formulas_dias = [ws.cell(r, 6).value for r in range(2, ws.max_row + 1)]
+    assert any(str(v).startswith("=IF(") and "TODAY()" in str(v) for v in formulas_dias), \
+        "falta la formula dinamica de dias restantes"
+    # Situacion dinamica referencia el umbral del Panel
+    formulas_sit = [ws.cell(r, 7).value for r in range(2, ws.max_row + 1)]
+    assert any("Panel!$B$8" in str(v) for v in formulas_sit), \
+        "la situacion no referencia el umbral del Panel"
+
+    panel = wb["Panel"]
+    assert panel["C8"].value == 60                      # umbral editable
+    assert panel["C5"].value == "Jonathan Veliz Soza"   # nombre
+    # KPIs dinamicos con COUNTIF sobre la hoja Cursos
+    valores_panel = [panel.cell(r, 3).value for r in range(11, 20)]
+    assert any("COUNTIF(Cursos" in str(v) for v in valores_panel), \
+        "faltan los KPIs dinamicos en el Panel"
+
     assert conteo.get("VENCIDO", 0) >= 2
-    print(f"[OK] excel: columnas nuevas y conteo={dict(conteo)}")
+    print(f"[OK] excel: Panel+Cursos, formulas dinamicas y umbral; conteo={dict(conteo)}")
 
 
 if __name__ == "__main__":

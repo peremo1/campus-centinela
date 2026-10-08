@@ -568,6 +568,22 @@ def obtener_cursos(session, cfg: Config, diag_dir=None):
     return cursos
 
 
+def obtener_nombre(session, cfg: Config) -> str:
+    """Nombre del trabajador logeado (del saludo de /progreso-cursos)."""
+    try:
+        r = session.get(cfg.url_base + RUTA_PROGRESO, timeout=TIMEOUT)
+        soup = BeautifulSoup(r.text, "html.parser")
+        saludo = soup.select_one(".saludo")
+        if saludo:
+            for d in saludo.select(".color-1"):
+                t = d.get_text(strip=True)
+                if t and "hola" not in _sin_acentos(t).lower():
+                    return t
+    except Exception:
+        pass
+    return cfg.rut
+
+
 # --------------------------------------------------------------------------- #
 # Descarga
 # --------------------------------------------------------------------------- #
@@ -610,103 +626,201 @@ def descargar_certificados(session, cfg, cursos, carpeta_base: Path, progreso_cb
 # Excel
 # --------------------------------------------------------------------------- #
 
-def generar_excel(cursos, ruta_xlsx: Path):
+def _situacion_snapshot(c, hoy, umbral):
+    """Situacion calculada en Python (foto del momento) para KPIs/logs."""
+    if not c.aprobado:
+        return (c.estado or "PENDIENTE")
+    if c.fecha_vencimiento is None:   # Indefinida o vigencia fija
+        return "INDEFINIDO"
+    d = (c.fecha_vencimiento - hoy).days
+    if d < 0:
+        return "VENCIDO"
+    if d <= umbral:
+        return "POR VENCER"
+    return "VIGENTE"
+
+
+def generar_excel(cursos, ruta_xlsx: Path, nombre="", rut="", umbral=60):
+    """Genera el Excel con dos hojas:
+
+    - "Panel": datos del trabajador, parametro editable (dias de aviso) y KPIs
+      que se recalculan solos al abrir (COUNTIF sobre la hoja de detalle).
+    - "Cursos": tabla por categoria. 'Dias restantes' = Expiracion - HOY() (lee
+      el reloj del PC) y 'Situacion' se colorea sola segun el umbral del Panel.
+    """
     from openpyxl import Workbook
-    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     from openpyxl.utils import get_column_letter
+    from openpyxl.formatting.rule import FormulaRule
+
+    TEAL = "0B6E7A"
+    COLORES = {"VIGENTE": "D9EAD3", "POR VENCER": "FCE8B2", "VENCIDO": "F4CCCC",
+               "INDEFINIDO": "E8EEF0", "PENDIENTE": "EDEDED", "REPROBADO": "F4CCCC"}
+    cab_fill = PatternFill("solid", fgColor=TEAL)
+    cab_font = Font(bold=True, color="FFFFFF")
+    borde = Border(*(Side(style="thin", color="D0D7DA"),) * 4)
 
     wb = Workbook()
-    ws = wb.active
-    ws.title = "Certificados"
-    encabezados = ["Categoria", "Subcategoria", "Curso", "Estado", "Situacion",
-                   "Nota %", "Avance %", "Vigencia", "Fecha emision",
-                   "Fecha vencimiento", "Dias para vencer", "ID curso", "RUT",
-                   "Cert. firma digital", "Archivo PDF", "URL certificado"]
-    ws.append(encabezados)
+    panel = wb.active
+    panel.title = "Panel"
+    ws = wb.create_sheet("Cursos")
 
-    cab_fill = PatternFill("solid", fgColor="0B6E7A")
-    cab_font = Font(bold=True, color="FFFFFF")
-    for col in range(1, len(encabezados) + 1):
+    # -------------------- Hoja "Cursos" (detalle) --------------------
+    enc = ["Categoria", "Subcategoria", "Curso", "Fecha de nota", "Expiracion",
+           "Dias restantes", "Situacion", "Nota %", "Avance %", "Vigencia",
+           "Estado", "Archivo PDF", "URL certificado", "Firma digital"]
+    ws.append(enc)
+    for col in range(1, len(enc) + 1):
         c = ws.cell(row=1, column=col)
         c.fill = cab_fill
         c.font = cab_font
-        c.alignment = Alignment(vertical="center")
+        c.alignment = Alignment(vertical="center", horizontal="center")
 
-    rellenos = {
-        "VENCIDO": PatternFill("solid", fgColor="F4CCCC"),
-        "POR_VENCER": PatternFill("solid", fgColor="FCE8B2"),
-        "VIGENTE": PatternFill("solid", fgColor="D9EAD3"),
-        "VIGENCIA_FIJA": PatternFill("solid", fgColor="D9EAD3"),
-        "REPROBADO": PatternFill("solid", fgColor="F4CCCC"),
-        "PENDIENTE": PatternFill("solid", fgColor="EDEDED"),
-    }
+    datos = sorted(cursos, key=lambda c: (c.categoria.lower(), c.subcategoria,
+                                          c.nombre.lower()))
+    UMBRAL = "Panel!$B$8"
+    hoy = dt.date.today()
+    snap = {}
+    r = 1
+    for c in datos:
+        r += 1
+        tiene_exp = c.aprobado and (c.fecha_vencimiento is not None)
+        ws.cell(r, 1, c.categoria)
+        ws.cell(r, 2, c.subcategoria)
+        ws.cell(r, 3, c.nombre)
+        if c.fecha_emision:
+            cell = ws.cell(r, 4, c.fecha_emision)
+            cell.number_format = "DD-MM-YYYY"
+        if tiene_exp:
+            e = ws.cell(r, 5, c.fecha_vencimiento)
+            e.number_format = "DD-MM-YYYY"
+            d = ws.cell(r, 6)
+            d.value = f'=IF(E{r}="","",E{r}-TODAY())'
+            d.number_format = "0"
+            ws.cell(r, 7).value = (
+                f'=IF(E{r}="","INDEFINIDO",IF(F{r}<0,"VENCIDO",'
+                f'IF(F{r}<={UMBRAL},"POR VENCER","VIGENTE")))')
+        else:
+            ws.cell(r, 7, c.estado if not c.aprobado else "INDEFINIDO")
+        ws.cell(r, 8, c.nota)
+        ws.cell(r, 9, c.avance)
+        ws.cell(r, 10, c.vigencia)
+        ws.cell(r, 11, c.estado)
+        ws.cell(r, 12, c.archivo or "")
+        ws.cell(r, 13, c.cert_url)
+        ws.cell(r, 14, c.firma_url)
+        for col in range(1, len(enc) + 1):
+            ws.cell(r, col).border = borde
+        s = _situacion_snapshot(c, hoy, umbral)
+        snap[s] = snap.get(s, 0) + 1
+    nfilas = r
 
-    def clave(c):
-        d = c.dias_para_vencer()
-        return (c.categoria.lower(), c.subcategoria, d if d is not None else 10**6)
-
-    for curso in sorted(cursos, key=clave):
-        sit = curso.situacion()
-        ws.append([
-            curso.categoria, curso.subcategoria, curso.nombre, curso.estado, sit,
-            curso.nota, curso.avance, curso.vigencia,
-            curso.fecha_emision.strftime("%d-%m-%Y") if curso.fecha_emision else "",
-            curso.fecha_vencimiento.strftime("%d-%m-%Y") if curso.fecha_vencimiento else "",
-            curso.dias_para_vencer() if curso.dias_para_vencer() is not None else "",
-            curso.curso_id, curso.rut, curso.firma_url, curso.archivo or "",
-            curso.cert_url,
-        ])
-        relleno = rellenos.get(sit)
-        if relleno:
-            for col in range(1, len(encabezados) + 1):
-                ws.cell(row=ws.max_row, column=col).fill = relleno
-
-    anchos = [30, 14, 48, 12, 14, 8, 9, 14, 14, 16, 15, 9, 13, 40, 40, 46]
+    anchos = [34, 13, 46, 13, 12, 13, 13, 7, 8, 13, 12, 36, 44, 40]
     for i, ancho in enumerate(anchos, 1):
         ws.column_dimensions[get_column_letter(i)].width = ancho
     ws.freeze_panes = "A2"
-    ws.auto_filter.ref = f"A1:{get_column_letter(len(encabezados))}{ws.max_row}"
+    ws.auto_filter.ref = f"A1:{get_column_letter(len(enc))}{nfilas}"
 
-    # Resumen
-    resumen = wb.create_sheet("Resumen")
-    conteo = {}
-    por_categoria = {}
-    for c in cursos:
-        s = c.situacion()
-        conteo[s] = conteo.get(s, 0) + 1
-        por_categoria[c.categoria] = por_categoria.get(c.categoria, 0) + 1
-    resumen.append(["Generado", dt.datetime.now().strftime("%d-%m-%Y %H:%M")])
-    resumen.append(["Total cursos", len(cursos)])
-    resumen.append([])
-    resumen.append(["Situacion", "Cantidad"])
-    orden = ["VENCIDO", "POR_VENCER", "VIGENTE", "VIGENCIA_FIJA", "PENDIENTE",
-             "REPROBADO", "SIN_FECHA"]
-    for k in orden:
-        if k in conteo:
-            resumen.append([k, conteo[k]])
-    for k in sorted(conteo):
-        if k not in orden:
-            resumen.append([k, conteo[k]])
-    resumen.append([])
-    resumen.append(["Categoria", "Cantidad"])
-    for k, v in sorted(por_categoria.items()):
-        resumen.append([k, v])
-    resumen.column_dimensions["A"].width = 32
-    resumen.column_dimensions["B"].width = 12
-    resumen["A4"].font = Font(bold=True)
-    resumen["B4"].font = Font(bold=True)
+    # Colores dinamicos por situacion (columna G) sobre toda la fila.
+    rango = f"A2:{get_column_letter(len(enc))}{nfilas}"
+    for etiqueta, color in COLORES.items():
+        ws.conditional_formatting.add(rango, FormulaRule(
+            formula=[f'$G2="{etiqueta}"'], stopIfTrue=False,
+            fill=PatternFill("solid", fgColor=color)))
+
+    # -------------------- Hoja "Panel" --------------------
+    panel.sheet_view.showGridLines = False
+    panel.column_dimensions["A"].width = 3
+    panel.column_dimensions["B"].width = 30
+    panel.column_dimensions["C"].width = 16
+
+    panel.merge_cells("B2:C2")
+    t = panel["B2"]
+    t.value = "CAMPUS CENTINELA"
+    t.font = Font(bold=True, size=18, color="FFFFFF")
+    t.alignment = Alignment(vertical="center", horizontal="center")
+    panel["B2"].fill = cab_fill
+    panel["C2"].fill = cab_fill
+    panel.merge_cells("B3:C3")
+    panel["B3"] = "Control de certificaciones"
+    panel["B3"].font = Font(italic=True, color="FFFFFF")
+    panel["B3"].alignment = Alignment(horizontal="center")
+    panel["B3"].fill = PatternFill("solid", fgColor="095761")
+    panel["C3"].fill = PatternFill("solid", fgColor="095761")
+    panel.row_dimensions[2].height = 28
+
+    def etiqueta(celda, texto):
+        panel[celda] = texto
+        panel[celda].font = Font(bold=True)
+
+    etiqueta("B5", "Trabajador"); panel["C5"] = nombre or "-"
+    etiqueta("B6", "RUT"); panel["C6"] = rut or "-"
+    etiqueta("B7", "Generado"); panel["C7"] = dt.datetime.now().strftime("%d-%m-%Y %H:%M")
+
+    etiqueta("B8", "Dias de aviso (por vencer)")
+    pbox = panel["C8"]
+    pbox.value = int(umbral)
+    pbox.font = Font(bold=True, color="0B6E7A")
+    pbox.fill = PatternFill("solid", fgColor="FFF4CC")
+    pbox.alignment = Alignment(horizontal="center")
+    panel["B9"] = "(edita este numero y los colores se recalculan)"
+    panel["B9"].font = Font(italic=True, size=9, color="888888")
+
+    # KPIs dinamicos
+    kpis = [
+        ("Vigentes", "VIGENTE", "D9EAD3"),
+        ("Por vencer", "POR VENCER", "FCE8B2"),
+        ("Vencidos", "VENCIDO", "F4CCCC"),
+        ("Indefinidos / fija", "INDEFINIDO", "E8EEF0"),
+        ("Pendientes", "PENDIENTE", "EDEDED"),
+    ]
+    panel["B11"] = "RESUMEN (se actualiza al abrir)"
+    panel["B11"].font = Font(bold=True, size=12, color="0B6E7A")
+    fila = 12
+    rango_sit = f"Cursos!$G$2:$G${nfilas}"
+    for texto, clave, color in kpis:
+        panel[f"B{fila}"] = texto
+        panel[f"B{fila}"].fill = PatternFill("solid", fgColor=color)
+        panel[f"B{fila}"].border = borde
+        cc = panel[f"C{fila}"]
+        cc.value = f'=COUNTIF({rango_sit},"{clave}")'
+        cc.font = Font(bold=True, size=12)
+        cc.alignment = Alignment(horizontal="center")
+        cc.fill = PatternFill("solid", fgColor=color)
+        cc.border = borde
+        fila += 1
+    panel[f"B{fila}"] = "Total cursos"
+    panel[f"B{fila}"].font = Font(bold=True)
+    panel[f"C{fila}"].value = f"=COUNTA(Cursos!$C$2:$C${nfilas})"
+    panel[f"C{fila}"].font = Font(bold=True)
+    panel[f"C{fila}"].alignment = Alignment(horizontal="center")
+
+    # Totales por categoria (dinamicos)
+    fila += 2
+    panel[f"B{fila}"] = "CURSOS POR CATEGORIA"
+    panel[f"B{fila}"].font = Font(bold=True, size=12, color="0B6E7A")
+    fila += 1
+    for cat in sorted({c.categoria for c in cursos}):
+        panel[f"B{fila}"] = cat
+        panel[f"B{fila}"].border = borde
+        cell = panel[f"C{fila}"]
+        cat_esc = cat.replace('"', '""')
+        cell.value = f'=COUNTIF(Cursos!$A$2:$A${nfilas},"{cat_esc}")'
+        cell.alignment = Alignment(horizontal="center")
+        cell.border = borde
+        fila += 1
+
+    wb.active = wb.sheetnames.index("Panel")
 
     ruta_xlsx.parent.mkdir(parents=True, exist_ok=True)
     wb.save(ruta_xlsx)
     log.info("Excel generado: %s", ruta_xlsx)
-    log.info("Vencidos: %d | Por vencer (<=60d): %d | Vigentes: %d | Fija: %d",
-             conteo.get("VENCIDO", 0), conteo.get("POR_VENCER", 0),
-             conteo.get("VIGENTE", 0), conteo.get("VIGENCIA_FIJA", 0))
-    # Normalizamos para el resumen de la GUI
-    conteo.setdefault("VENCIDO", 0)
-    conteo.setdefault("POR_VENCER", 0)
-    conteo.setdefault("VIGENTE", 0)
-    return conteo
+    log.info("Vigentes: %d | Por vencer: %d | Vencidos: %d | Indefinidos: %d",
+             snap.get("VIGENTE", 0), snap.get("POR VENCER", 0),
+             snap.get("VENCIDO", 0), snap.get("INDEFINIDO", 0))
+    return {"VIGENTE": snap.get("VIGENTE", 0), "POR_VENCER": snap.get("POR VENCER", 0),
+            "VENCIDO": snap.get("VENCIDO", 0), "INDEFINIDO": snap.get("INDEFINIDO", 0),
+            "PENDIENTE": snap.get("PENDIENTE", 0)}
 
 
 # --------------------------------------------------------------------------- #
@@ -746,10 +860,11 @@ def ejecutar(cfg: Config, dump=False, sin_descarga=False, progreso_cb=None):
     cursos = obtener_cursos(session, cfg, diag_dir=base / "diagnostico")
     if not cursos:
         return [], None, {}
+    nombre = obtener_nombre(session, cfg)
     if not sin_descarga:
         descargar_certificados(session, cfg, cursos, base / "certificados", progreso_cb)
     ruta_xlsx = base / "certificados_centinela.xlsx"
-    conteo = generar_excel(cursos, ruta_xlsx)
+    conteo = generar_excel(cursos, ruta_xlsx, nombre=nombre, rut=cfg.rut)
     return cursos, ruta_xlsx, conteo
 
 
