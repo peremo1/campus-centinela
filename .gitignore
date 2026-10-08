@@ -1,0 +1,27 @@
+# Credenciales reales: NUNCA subir al repositorio
+config.ini
+
+# Resultados (certificados descargados + Excel + HTML de diagnóstico)
+salida/
+*.pdf
+*.xlsx
+
+# Diagnóstico
+diagnostico/
+*.html
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+
+# Ejecutables generados con PyInstaller
+build/
+dist/
+*.spec
+
+# Sistema
+.DS_Store
+Thumbs.db
