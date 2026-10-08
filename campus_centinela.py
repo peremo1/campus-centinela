@@ -164,12 +164,15 @@ def clasificar_curso(nombre: str):
 # --------------------------------------------------------------------------- #
 
 class Config:
-    def __init__(self, usuario, contrasena, rut, carpeta_salida, url_base):
+    def __init__(self, usuario, contrasena, rut, carpeta_salida, url_base,
+                 extranjero=False):
         self.usuario = normalizar_rut(usuario)
         self.contrasena = contrasena
         self.rut = normalizar_rut(rut) or self.usuario
         self.carpeta_salida = carpeta_salida
         self.url_base = url_base.rstrip("/")
+        # El formulario tiene un radio name="opcion": nacional | extranjero.
+        self.opcion = "extranjero" if extranjero else "nacional"
 
     def url_certificado(self, curso_id: str) -> str:
         return self.url_base + PLANTILLA_CERT.format(id=curso_id, rut=self.rut)
@@ -177,7 +180,7 @@ class Config:
 
 def cargar_config(ruta_ini="config.ini", pedir_interactivo=False,
                   usuario=None, contrasena=None, rut=None,
-                  carpeta=None, url_base=None) -> Config:
+                  carpeta=None, url_base=None, extranjero=False) -> Config:
     """Carga credenciales. Prioridad: argumentos > entorno > config.ini > prompt."""
     usuario = usuario or os.environ.get("CC_USUARIO", "")
     contrasena = contrasena or os.environ.get("CC_CONTRASENA", "")
@@ -208,7 +211,11 @@ def cargar_config(ruta_ini="config.ini", pedir_interactivo=False,
         )
     if contrasena.upper() == "CAMBIAME":
         raise ValueError("La contrasena en config.ini sigue en 'CAMBIAME'.")
-    return Config(usuario, contrasena, rut, carpeta, url_base)
+    if not extranjero and p.exists():
+        cp = configparser.ConfigParser()
+        cp.read(p, encoding="utf-8")
+        extranjero = cp.getboolean("credenciales", "extranjero", fallback=False)
+    return Config(usuario, contrasena, rut, carpeta, url_base, extranjero=extranjero)
 
 
 # --------------------------------------------------------------------------- #
@@ -233,12 +240,32 @@ def _buscar_formulario_login(soup):
     return None
 
 
-def _intentar_login(session: requests.Session, cfg: Config) -> bool:
-    """Un intento de login. Devuelve True si quedo autenticado.
+def _campos_formulario(form, cfg: Config) -> dict:
+    """Arma los datos del POST desde el formulario real.
 
-    Reenvia TODOS los campos ocultos del formulario real (token CSRF de Joomla
-    incluido) y verifica consultando /progreso-cursos.
+    Clave: para radios/checkbox se incluye SOLO el que esta marcado (checked).
+    El formulario tiene dos radios name="opcion" (nacional/extranjero); sin este
+    filtro se enviaba el ultimo (extranjero) por error. Luego se fija 'opcion'
+    segun la eleccion del usuario.
     """
+    datos = {}
+    for inp in form.find_all("input"):
+        nombre = inp.get("name")
+        if not nombre:
+            continue
+        tipo = (inp.get("type") or "text").lower()
+        if tipo in ("radio", "checkbox") and inp.get("checked") is None:
+            continue  # ignorar los no marcados
+        datos[nombre] = inp.get("value", "")
+    datos["username"] = cfg.usuario
+    datos["password"] = cfg.contrasena
+    datos["remember"] = "yes"
+    datos["opcion"] = cfg.opcion
+    return datos
+
+
+def _intentar_login(session: requests.Session, cfg: Config):
+    """Un intento de login. Devuelve (exito, html_login, html_respuesta)."""
     url_login = cfg.url_base + RUTA_LOGIN
     r = session.get(url_login, timeout=TIMEOUT)
     r.raise_for_status()
@@ -248,32 +275,27 @@ def _intentar_login(session: requests.Session, cfg: Config) -> bool:
         raise RuntimeError("No se encontro el formulario de login. Revisa la URL base "
                            "o usa Diagnostico para guardar el HTML.")
     action = urljoin(url_login, form.get("action") or url_login)
-    datos = {}
-    for inp in form.find_all(["input", "button"]):
-        nombre = inp.get("name")
-        if nombre:
-            datos[nombre] = inp.get("value", "")
-    datos["username"] = cfg.usuario
-    datos["password"] = cfg.contrasena
-    datos["remember"] = "yes"
+    datos = _campos_formulario(form, cfg)
+    hay_token = any(re.fullmatch(r"[0-9a-f]{32}", k) for k in datos)
+    log.debug("Login action=%s | campos=%s | token=%s | opcion=%s", action,
+              ",".join(sorted(k for k in datos if k != "password")), hay_token, cfg.opcion)
     resp = session.post(action, data=datos, timeout=TIMEOUT, allow_redirects=True,
                         headers={"Referer": url_login})
     resp.raise_for_status()
     verif = session.get(cfg.url_base + RUTA_PROGRESO, timeout=TIMEOUT)
-    return not _parece_pagina_login(verif.text)
+    return (not _parece_pagina_login(verif.text)), r.text, resp.text
 
 
-def login(session: requests.Session, cfg: Config, intentos: int = 4) -> None:
-    """Login con reintentos.
-
-    El sitio rechaza de forma intermitente el primer POST (se observa que un
-    segundo intento entra). Por eso se reintenta con la sesion limpia hasta
-    'intentos' veces antes de darse por vencido.
-    """
-    log.info("Abriendo pagina de login...")
+def login(session: requests.Session, cfg: Config, intentos: int = 4,
+          diag_dir=None) -> None:
+    """Login con reintentos. Si falla, guarda el detalle para diagnostico."""
+    log.info("Abriendo pagina de login (opcion: %s)...", cfg.opcion)
+    ultimo = None
     for intento in range(1, intentos + 1):
         try:
-            if _intentar_login(session, cfg):
+            exito, html_login, html_resp = _intentar_login(session, cfg)
+            ultimo = (html_login, html_resp)
+            if exito:
                 log.info("Sesion iniciada correctamente.")
                 return
             log.warning("La plataforma no acepto el acceso (intento %d/%d). "
@@ -283,10 +305,20 @@ def login(session: requests.Session, cfg: Config, intentos: int = 4) -> None:
                         intento, intentos, e)
         session.cookies.clear()
         time.sleep(min(2 * intento, 6))
+
+    if diag_dir and ultimo:
+        try:
+            d = Path(diag_dir)
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "login_pagina.html").write_text(ultimo[0], encoding="utf-8")
+            (d / "login_respuesta.html").write_text(ultimo[1], encoding="utf-8")
+            log.info("Guarde el detalle del login en %s para diagnostico.", d)
+        except Exception as e:
+            log.warning("No pude guardar el diagnostico de login: %s", e)
     raise RuntimeError(
-        "No se pudo iniciar sesion tras %d intentos. Revisa el RUT y la contrasena. "
-        "Si usas documento extranjero, verifica que esa sea la credencial correcta."
-        % intentos)
+        "No se pudo iniciar sesion tras %d intentos. Verifica el RUT y la contrasena; "
+        "si tu documento es extranjero, marca EXTRANJERO. Se guardo el detalle del "
+        "intento en la carpeta de salida (diagnostico) para revisar." % intentos)
 
 
 def _parece_pagina_login(html: str) -> bool:
@@ -581,7 +613,6 @@ def ejecutar(cfg: Config, dump=False, sin_descarga=False, progreso_cb=None):
     """Flujo completo: login -> progreso -> (descarga) -> Excel.
     Devuelve (cursos, ruta_excel, conteo)."""
     session = crear_sesion()
-    login(session, cfg)
     base = Path(cfg.carpeta_salida)
     try:
         base.mkdir(parents=True, exist_ok=True)
@@ -589,6 +620,7 @@ def ejecutar(cfg: Config, dump=False, sin_descarga=False, progreso_cb=None):
         raise RuntimeError(
             "No se pudo crear la carpeta de salida '%s' (%s). Elige una carpeta "
             "con permisos de escritura, por ejemplo en Documentos." % (base, e))
+    login(session, cfg, diag_dir=base / "diagnostico")
     if dump:
         guardar_diagnostico(session, cfg, base / "diagnostico")
     log.info("Leyendo pagina de progreso de cursos...")
@@ -617,6 +649,8 @@ def main(argv=None):
                         help="Guarda el HTML de portada y progreso para diagnostico")
     parser.add_argument("--sin-descarga", action="store_true",
                         help="Solo genera el Excel")
+    parser.add_argument("--extranjero", action="store_true",
+                        help="Usar la opcion EXTRANJERO en el login (por defecto NACIONAL)")
     parser.add_argument("--salida", default=None)
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
@@ -626,7 +660,8 @@ def main(argv=None):
         format="%(asctime)s  %(levelname)-7s %(message)s", datefmt="%H:%M:%S")
 
     try:
-        cfg = cargar_config(args.config, args.interactivo, carpeta=args.salida)
+        cfg = cargar_config(args.config, args.interactivo, carpeta=args.salida,
+                            extranjero=args.extranjero)
     except ValueError as e:
         log.error("%s", e)
         return 2

@@ -69,6 +69,10 @@ def main(page: ft.Page):
                            prefix_text="", border_radius=10)
     tf_pass = ft.TextField(label="Contrasena", password=True,
                            can_reveal_password=True, border_radius=10)
+    rg_opcion = ft.RadioGroup(value="nacional", content=ft.Row(spacing=16, controls=[
+        ft.Radio(value="nacional", label="NACIONAL"),
+        ft.Radio(value="extranjero", label="EXTRANJERO"),
+    ]))
     tf_folder = ft.TextField(label="Carpeta de salida", value=_carpeta_default(),
                              expand=True, border_radius=10)
     sw_guardar = ft.Switch(label="Recordar datos en este equipo", value=True)
@@ -158,7 +162,8 @@ def main(page: ft.Page):
             return None
         return cc.Config(usuario=usuario, contrasena=contrasena, rut="",
                          carpeta_salida=(tf_folder.value or "").strip() or _carpeta_default(),
-                         url_base="https://www.campuscentinela.cl")
+                         url_base="https://www.campuscentinela.cl",
+                         extranjero=(rg_opcion.value == "extranjero"))
 
     def trabajo(cfg, dump, sin_descarga):
         def progreso_cb(i, total):
@@ -247,6 +252,8 @@ def main(page: ft.Page):
     tarjeta = ft.Container(
         padding=18, border_radius=14, bgcolor="#F4F7F8",
         content=ft.Column(spacing=12, controls=[
+            ft.Text("Tipo de documento:", size=12, color="#555"),
+            rg_opcion,
             tf_user, tf_pass,
             ft.Row([tf_folder, ft.OutlinedButton("Examinar", on_click=elegir_carpeta)],
                    spacing=8),

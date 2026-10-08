@@ -146,6 +146,40 @@ def test_excel():
           f"conteo={conteo}")
 
 
+# HTML real del formulario de login (del .mhtml que entrego el usuario)
+FORM_LOGIN = """
+<form action="https://www.campuscentinela.cl/ingresar?task=user.login" method="post" class="form-validate">
+  <label><input type="radio" name="opcion" value="nacional" checked=""> NACIONAL</label>
+  <label><input type="radio" name="opcion" value="extranjero"> EXTRANJERO</label>
+  <input type="text" name="username" value="">
+  <input type="password" name="password" value="">
+  <label><input type="checkbox" name="remember" value="yes"> Recuerdeme</label>
+  <button type="submit">Identificarse</button>
+</form>
+"""
+
+
+def test_campos_login():
+    from bs4 import BeautifulSoup
+    form = BeautifulSoup(FORM_LOGIN, "html.parser").find("form")
+
+    # NACIONAL (por defecto): debe enviar opcion=nacional, NO extranjero
+    c = cc.Config("21.080.196-0", "clave", "", "salida", "https://www.campuscentinela.cl")
+    datos = cc._campos_formulario(form, c)
+    assert datos["opcion"] == "nacional", datos.get("opcion")
+    assert datos["username"] == "21080196-0"
+    assert datos["password"] == "clave"
+    assert datos["remember"] == "yes"
+
+    # EXTRANJERO: debe enviar opcion=extranjero
+    c2 = cc.Config("ABC123", "y", "", "salida", "https://www.campuscentinela.cl",
+                   extranjero=True)
+    datos2 = cc._campos_formulario(form, c2)
+    assert datos2["opcion"] == "extranjero"
+    print("[OK] login: solo radios marcados; opcion=nacional por defecto, "
+          "extranjero cuando se pide")
+
+
 def test_normalizar_rut():
     assert cc.normalizar_rut(" 21.080.196-0 ") == "21080196-0"
     assert cc.normalizar_rut("12.345.678-k") == "12345678-K"
@@ -160,7 +194,7 @@ def test_normalizar_rut():
 if __name__ == "__main__":
     fallos = 0
     for fn in (test_clasificacion, test_extraccion, test_fechas_y_carpetas, test_excel,
-               test_normalizar_rut):
+               test_campos_login, test_normalizar_rut):
         try:
             fn()
         except AssertionError as e:
