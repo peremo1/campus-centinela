@@ -94,8 +94,11 @@ def test_vencimiento():
     assert cc._calcular_vencimiento("50", "Indefinida", f) == (None, False)
     # curso de vigencia fija -> no vence
     assert cc._calcular_vencimiento("1411", "1 año", f) == (None, True)
+    # la vigencia puede venir como FECHA (caso aulas) -> esa es la expiracion
+    assert cc._calcular_vencimiento("801", "2026-12-31", None) == (dt.date(2026, 12, 31), False)
+    assert cc._calcular_vencimiento("801", "31-12-2026", None) == (dt.date(2026, 12, 31), False)
     assert cc._parse_fecha_iso("2024-03-15 10:20:30") == dt.date(2024, 3, 15)
-    print("[OK] vencimiento: años/meses/indefinida/fija y parseo de fecha")
+    print("[OK] vencimiento: años/meses/indefinida/fija/FECHA y parseo")
 
 
 # --------------------------------------------------------------------------- #
@@ -120,7 +123,11 @@ JSON_CURSOS = """{"success":true,"data":[
   "estado_curso":"APROBADO","s":"0","d":"0"},
  {"curso_id":"1411","cat_id":"3","curso_cat":"MUELLE","curso_nombre":"MUELLE Conduccion Cuesta Michilla",
   "estado_curso":"APROBADO","notobt":"100","porcentaje_avance":"100","vigencia":"1 año",
-  "fecha_nota":"2020-01-01","certificado_directo":"","firma_digital":"0","s":"0","d":"0"}
+  "fecha_nota":"2020-01-01","certificado_directo":"","firma_digital":"0","s":"0","d":"0"},
+ {"curso_id":"801","cat_id":"4","curso_cat":"OPERACIONES PLANTA CONCENTRADORA Y/O CATODO",
+  "curso_nombre":"AULA Reglamento General de Aislacion y Bloqueo","estado_curso":"APROBADO",
+  "notobt":"100","porcentaje_avance":"100","vigencia":"2026-12-31","fecha_nota":"2026-08-27",
+  "certificado_directo":"","firma_digital":"0","s":"0","d":"0"}
 ]}"""
 
 
@@ -144,7 +151,13 @@ def test_obtener_cursos():
     cursos = cc.obtener_cursos(_FakeSession(JSON_CURSOS), cfg, diag_dir=None)
     por_id = {c.curso_id: c for c in cursos}
     # Se excluyen cat_id 28 y el curso 2594
-    assert set(por_id) == {"134", "223", "999", "1411"}, set(por_id)
+    assert set(por_id) == {"134", "223", "999", "1411", "801"}, set(por_id)
+
+    # 801: la vigencia venia como FECHA -> esa es la expiracion (bug corregido)
+    c801 = por_id["801"]
+    assert c801.fecha_vencimiento == dt.date(2026, 12, 31), c801.fecha_vencimiento
+    assert c801.subcategoria in ("Operaciones Planta Concentradora y-o Catodo",)
+    assert c801.situacion() in ("VIGENTE", "POR_VENCER", "VENCIDO")
 
     c134 = por_id["134"]
     assert c134.categoria == "OPERACIONES PLANTA CONCENTRADORA Y/O CATODO"
@@ -190,6 +203,7 @@ def test_excel():
     enc = [c.value for c in ws[1]]
     assert enc[0] == "Categoria"
     assert "Dias restantes" in enc and "Situacion" in enc and "Expiracion" in enc
+    assert "Fuente vig." in enc
 
     # Debe existir al menos una formula dinamica (Dias restantes = Exp - HOY())
     formulas_dias = [ws.cell(r, 6).value for r in range(2, ws.max_row + 1)]

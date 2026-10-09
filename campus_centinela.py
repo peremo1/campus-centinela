@@ -226,8 +226,12 @@ def _add_months(d: dt.date, n: int) -> dt.date:
 
 
 def _calcular_vencimiento(curso_id, vigencia, fecha_nota):
-    """Replica la logica de la plataforma: emision (fecha_nota) + vigencia.
+    """Calcula el vencimiento desde el campo 'vigencia' de la plataforma.
 
+    'vigencia' puede ser:
+      - "Indefinida"            -> no vence
+      - una FECHA ("2026-12-31" o "31-12-2026") -> esa es la expiracion
+      - "1 año" / "2 años" / "6 meses" -> emision (fecha_nota) + ese plazo
     Devuelve (fecha_vencimiento|None, vigencia_fija:bool).
     """
     try:
@@ -236,15 +240,20 @@ def _calcular_vencimiento(curso_id, vigencia, fecha_nota):
         cid = -1
     if cid in VIGENCIA_FIJA:
         return None, True
-    if not fecha_nota:
-        return None, False
-    v = _sin_acentos(str(vigencia or "")).lower()
+    v_raw = str(vigencia or "").strip()
+    v = _sin_acentos(v_raw).lower()
     if not v or "indefinid" in v:
+        return None, False
+    # La vigencia puede venir como una fecha directa (caso de varias aulas).
+    f = _parse_fecha_iso(v_raw)
+    if f:
+        return f, False
+    if not fecha_nota:
         return None, False
     n = _num_inicial(v)
     if n <= 0:
         return None, False
-    if "ano" in v or "año" in str(vigencia or "").lower():
+    if "ano" in v or "año" in v_raw.lower():
         return _add_years(fecha_nota, n), False
     if "mes" in v:
         return _add_months(fecha_nota, n), False
@@ -464,6 +473,11 @@ class Curso:
         self.firma_url = firma_url
         self.vigencia_fija = vigencia_fija
         self.archivo = None
+        # Verificacion con el PDF del certificado (segunda fuente)
+        self.fuente = "Plataforma"      # "PDF (certificado)" si se verifico
+        self.pdf_leido = False
+        self.pdf_fecha_nota = None
+        self.pdf_vig_txt = ""
 
     @property
     def aprobado(self):
@@ -588,37 +602,108 @@ def obtener_nombre(session, cfg: Config) -> str:
 # Descarga
 # --------------------------------------------------------------------------- #
 
-def descargar_certificados(session, cfg, cursos, carpeta_base: Path, progreso_cb=None):
+def extraer_datos_pdf(ruta):
+    """Lee un certificado PDF y extrae la vigencia y la fecha de nota.
+
+    Devuelve dict {fecha_venc|None, indefinida:bool, fecha_nota|None, vig_txt} o
+    None si no se pudo leer. La plataforma imprime en el PDF, por ejemplo:
+      VIGENCIA DEL CERTIFICADO: 31-12-2026   (o "INDEFINIDA", o "02-05-2027 (2 años)")
+      FECHA NOTA:27-08-2026
+    """
+    try:
+        from pypdf import PdfReader
+    except ImportError:
+        return None
+    try:
+        txt = ""
+        for p in PdfReader(str(ruta)).pages:
+            txt += (p.extract_text() or "") + "\n"
+    except Exception:
+        return None
+    mv = re.search(r"VIGENCIA DEL CERTIFICADO:\s*([^\n]+)", txt, re.I)
+    mf = re.search(r"FECHA NOTA:\s*([0-9]{1,2}-[0-9]{1,2}-[0-9]{4})", txt, re.I)
+    vig_txt = mv.group(1).strip() if mv else ""
+    indef = "indefinid" in _sin_acentos(vig_txt).lower()
+    return {
+        "fecha_venc": None if indef else _parse_fecha_iso(vig_txt),
+        "indefinida": indef,
+        "fecha_nota": _parse_fecha_iso(mf.group(1)) if mf else None,
+        "vig_txt": vig_txt,
+    }
+
+
+def _descargar_pdf(session, cfg, curso):
+    """Baja el PDF del certificado. Devuelve (bytes|None, detalle).
+
+    Primero pide certificado.php (que genera el PDF). Si no devuelve un PDF,
+    pide el archivo ya generado <rut>.pdf en la carpeta de descarga.
+    """
+    directo = (cfg.url_base +
+               "/lms/certificados/2_descarga_certificado/%s.pdf" % cfg.rut)
+    urls = [curso.cert_url] + ([directo] if directo != curso.cert_url else [])
+    detalle = "sin respuesta"
+    for url in urls:
+        try:
+            r = session.get(url, timeout=TIMEOUT, allow_redirects=True,
+                            headers={"Referer": cfg.url_base + RUTA_PROGRESO})
+            r.raise_for_status()
+            idx = r.content.find(b"%PDF")
+            if 0 <= idx <= 2048:
+                return r.content[idx:], "ok"
+            detalle = "respuesta no-PDF (%s, %d bytes)" % (
+                r.headers.get("Content-Type", "?"), len(r.content))
+        except requests.RequestException as e:
+            detalle = str(e)
+    return None, detalle
+
+
+def descargar_certificados(session, cfg, cursos, carpeta_base: Path,
+                           progreso_cb=None, verificar_pdf=True):
     carpeta_base.mkdir(parents=True, exist_ok=True)
     ok = 0
     total = len(cursos)
+    aprobados = [c for c in cursos if c.aprobado]
+    log.info("Descargando %d certificados (de %d cursos)...", len(aprobados), total)
     for i, curso in enumerate(cursos, 1):
         if not curso.aprobado:
             if progreso_cb:
                 progreso_cb(i, total)
-            continue  # sin certificado emitido (pendiente/reprobado)
+            continue
         destino_dir = carpeta_base / curso.carpeta_relativa()
         destino_dir.mkdir(parents=True, exist_ok=True)
         destino = destino_dir / curso.nombre_archivo()
-        try:
-            r = session.get(curso.cert_url, timeout=TIMEOUT)
-            r.raise_for_status()
-            contenido = r.content
-            ctype = r.headers.get("Content-Type", "")
-            if b"%PDF" not in contenido[:1024] and "pdf" not in ctype.lower():
-                log.warning("  [%d/%d] id=%s no devolvio PDF (%s). Probablemente el "
-                            "curso no tiene certificado emitido. Se omite.",
-                            i, total, curso.curso_id, ctype or "sin content-type")
-            else:
-                destino.write_bytes(contenido)
+        datos, detalle = _descargar_pdf(session, cfg, curso)
+        if datos:
+            try:
+                destino.write_bytes(datos)
                 curso.archivo = str(destino)
                 ok += 1
-                log.info("  [%d/%d] OK  %s", i, total, destino.name)
-        except requests.RequestException as e:
-            log.error("  [%d/%d] Error id=%s: %s", i, total, curso.curso_id, e)
+                extra = ""
+                if verificar_pdf:
+                    info = extraer_datos_pdf(destino)
+                    if info:
+                        curso.pdf_leido = True
+                        curso.pdf_fecha_nota = info["fecha_nota"]
+                        curso.pdf_vig_txt = info["vig_txt"]
+                        curso.fuente = "PDF (certificado)"
+                        curso.vigencia_fija = False
+                        curso.fecha_vencimiento = (
+                            None if info["indefinida"] else
+                            (info["fecha_venc"] or curso.fecha_vencimiento))
+                        extra = " | vigencia PDF: %s" % (info["vig_txt"] or "?")
+                log.info("  [%d/%d] OK  %s%s", i, total, destino.name, extra)
+            except OSError as e:
+                log.error("  [%d/%d] no se pudo guardar %s: %s",
+                          i, total, destino.name, e)
+        else:
+            log.warning("  [%d/%d] id=%s SIN PDF (%s)",
+                        i, total, curso.curso_id, detalle)
         if progreso_cb:
             progreso_cb(i, total)
-    log.info("Descargados %d de %d certificados.", ok, total)
+    log.info("Descargados %d de %d certificados aprobados.", ok, len(aprobados))
+    if ok == 0 and aprobados:
+        log.warning("No se descargo ningun PDF. Revisa el registro en la carpeta "
+                    "diagnostico. Puede ser bloqueo de red, sesion o antivirus.")
     return ok
 
 
@@ -675,7 +760,7 @@ def generar_excel(cursos, ruta_xlsx: Path, nombre="", rut="", umbral=60):
     # -------------------- Hoja "Cursos" (detalle) --------------------
     enc = ["Categoria", "Subcategoria", "Curso", "Fecha de nota", "Expiracion",
            "Dias restantes", "Situacion", "Nota %", "Avance %", "Vigencia",
-           "Estado", "Archivo PDF", "URL certificado"]
+           "Estado", "Archivo PDF", "URL certificado", "Fuente vig."]
     ws.append(enc)
     for col in range(1, len(enc) + 1):
         c = ws.cell(row=1, column=col)
@@ -724,13 +809,14 @@ def generar_excel(cursos, ruta_xlsx: Path, nombre="", rut="", umbral=60):
         if c.aprobado and c.cert_url:
             cm.hyperlink = c.cert_url
             cm.font = link_font
+        ws.cell(r, 14, c.fuente)
         for col in range(1, len(enc) + 1):
             ws.cell(r, col).border = borde
         s = _situacion_snapshot(c, hoy, umbral)
         snap[s] = snap.get(s, 0) + 1
     nfilas = r
 
-    anchos = [34, 13, 46, 13, 12, 13, 13, 7, 8, 13, 12, 36, 44]
+    anchos = [34, 13, 46, 13, 12, 13, 13, 7, 8, 13, 12, 36, 44, 16]
     for i, ancho in enumerate(anchos, 1):
         ws.column_dimensions[get_column_letter(i)].width = ancho
     ws.freeze_panes = "A2"
@@ -882,18 +968,39 @@ def ejecutar(cfg: Config, dump=False, sin_descarga=False, progreso_cb=None):
         raise RuntimeError(
             "No se pudo crear la carpeta de salida '%s' (%s). Elige una carpeta "
             "con permisos de escritura, por ejemplo en Documentos." % (base, e))
-    login(session, cfg, diag_dir=base / "diagnostico")
-    if dump:
-        guardar_diagnostico(session, cfg, base / "diagnostico")
-    cursos = obtener_cursos(session, cfg, diag_dir=base / "diagnostico")
-    if not cursos:
-        return [], None, {}
-    nombre = obtener_nombre(session, cfg)
-    if not sin_descarga:
-        descargar_certificados(session, cfg, cursos, base / "certificados", progreso_cb)
-    ruta_xlsx = base / "certificados_centinela.xlsx"
-    conteo = generar_excel(cursos, ruta_xlsx, nombre=nombre, rut=cfg.rut)
-    return cursos, ruta_xlsx, conteo
+
+    # Registro completo a archivo (para revisar que paso / fallos)
+    diag = base / "diagnostico"
+    fh = None
+    try:
+        diag.mkdir(parents=True, exist_ok=True)
+        fh = logging.FileHandler(diag / "registro.txt", mode="w", encoding="utf-8")
+        fh.setFormatter(logging.Formatter("%(asctime)s  %(levelname)-7s %(message)s",
+                                          "%H:%M:%S"))
+        log.setLevel(logging.INFO)
+        log.addHandler(fh)
+    except Exception:
+        fh = None
+
+    try:
+        login(session, cfg, diag_dir=diag)
+        if dump:
+            guardar_diagnostico(session, cfg, diag)
+        cursos = obtener_cursos(session, cfg, diag_dir=diag)
+        if not cursos:
+            return [], None, {}
+        nombre = obtener_nombre(session, cfg)
+        if not sin_descarga:
+            descargar_certificados(session, cfg, cursos, base / "certificados",
+                                   progreso_cb)
+        ruta_xlsx = base / "certificados_centinela.xlsx"
+        conteo = generar_excel(cursos, ruta_xlsx, nombre=nombre, rut=cfg.rut)
+        log.info("Proceso terminado. Resultados en: %s", base)
+        return cursos, ruta_xlsx, conteo
+    finally:
+        if fh:
+            log.removeHandler(fh)
+            fh.close()
 
 
 # --------------------------------------------------------------------------- #

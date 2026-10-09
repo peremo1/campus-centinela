@@ -265,14 +265,19 @@ def main(page: ft.Page):
                                 ft.Container(expand=True), btn_abrir])
 
     caja_log = ft.Container(
-        bgcolor=FONDO_LOG, border_radius=12, expand=True, content=log_list)
+        bgcolor=FONDO_LOG, border_radius=12, expand=True, height=240,
+        content=log_list)
 
     cuerpo = ft.Container(
         padding=20, expand=True,
-        content=ft.Column(expand=True, spacing=14, controls=[
+        content=ft.Column(expand=True, spacing=12, controls=[
             tarjeta, acciones, progress,
-            ft.Text("Actividad:", size=12, weight=ft.FontWeight.BOLD),
-            caja_log, status,
+            ft.Text("Actividad (registro en vivo):", size=12,
+                    weight=ft.FontWeight.BOLD),
+            caja_log,
+            ft.Text("El detalle completo se guarda en  <carpeta>\\diagnostico\\"
+                    "registro.txt", size=10, italic=True, color="#888"),
+            status,
         ]))
 
     page.add(ft.Column(expand=True, spacing=0, controls=[header, cuerpo]))
